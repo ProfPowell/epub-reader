@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>&lt;epub-reader&gt; embed example</title>
+  <script type="module" src="../src/epub-reader.js"></script>
+  <style>
+    html, body { block-size: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    body { display: grid; grid-template-rows: auto 1fr; }
+    header { padding: .75rem 1rem; border-block-end: 1px solid #ddd; }
+    main { min-block-size: 0; }
+    /* The component fills whatever box it's given. */
+    epub-reader { block-size: 100%; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Embed example.</strong>
+    Drop an EPUB on the reader below, or
+    <label><input id="file" type="file" accept=".epub" /> choose one</label>.
+  </header>
+  <main>
+    <!-- The <epub-reader> element is self-contained: its shadow DOM provides the
+         toolbar, TOC sidebar, and content iframe. You can also pass src="book.epub". -->
+    <epub-reader id="r"></epub-reader>
+  </main>
+  <script type="module">
+    const r = document.getElementById('r');
+    document.getElementById('file').addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      if (f) r.open(f);
+    });
+  </script>
+</body>
+</html>

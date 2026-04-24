@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EPUB Reader</title>
+
+  <!-- Vanilla Breeze: layered HTML component system (used for the app shell only). -->
+  <link rel="stylesheet" href="https://unpkg.com/vanilla-breeze/dist/cdn/vanilla-breeze.css" />
+  <script type="module" src="https://unpkg.com/vanilla-breeze/dist/cdn/vanilla-breeze.js"></script>
+
+  <!-- The reader custom element. Dependency-free vanilla JS. -->
+  <script type="module" src="./src/epub-reader.js"></script>
+
+  <style>
+    /* Fallback app-shell styles in case vanilla-breeze doesn't load. */
+    :root {
+      --vb-color-surface: #fbfaf7;
+      --vb-color-text: #1f1f1f;
+      --vb-color-muted: #667085;
+      --vb-color-primary: #2d6cdf;
+      --vb-color-border: #e4e4e7;
+      color-scheme: light dark;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --vb-color-surface: #17181b;
+        --vb-color-text: #f5f5f5;
+        --vb-color-muted: #9aa0a6;
+        --vb-color-primary: #6aa7ff;
+        --vb-color-border: #2a2c31;
+      }
+    }
+    html, body { block-size: 100%; margin: 0; }
+    body {
+      font-family: var(--vb-font-body, system-ui, -apple-system, "Segoe UI", sans-serif);
+      background: var(--vb-color-surface);
+      color: var(--vb-color-text);
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-block-size: 100%;
+    }
+
+    .app-header {
+      display: flex;
+      gap: .75rem;
+      align-items: center;
+      padding: .75rem 1rem;
+      border-block-end: 1px solid var(--vb-color-border);
+      background: var(--vb-color-surface);
+    }
+    .app-header h1 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 0;
+      margin-inline-end: auto;
+    }
+    .app-header h1 small { font-weight: 400; color: var(--vb-color-muted); margin-inline-start: .5rem; }
+
+    .picker {
+      display: inline-flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .4rem .7rem;
+      border: 1px solid var(--vb-color-border);
+      border-radius: .4rem;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font: inherit;
+    }
+    .picker:hover { background: color-mix(in srgb, var(--vb-color-primary) 8%, transparent); }
+    .picker input { display: none; }
+
+    main#app {
+      position: relative;
+      min-block-size: 0;
+      overflow: hidden;
+    }
+
+    epub-reader { block-size: 100%; }
+
+    .drop-hint {
+      position: absolute;
+      inset: 0;
+      display: none;
+      place-items: center;
+      pointer-events: none;
+      z-index: 10;
+      padding: 2rem;
+      text-align: center;
+      background: color-mix(in srgb, var(--vb-color-primary) 10%, transparent);
+      outline: 3px dashed var(--vb-color-primary);
+      outline-offset: -.75rem;
+      color: var(--vb-color-text);
+      font-weight: 600;
+    }
+    body.dragging .drop-hint { display: grid; }
+
+    .samples {
+      color: var(--vb-color-muted);
+      font-size: .9rem;
+    }
+    .samples a { color: var(--vb-color-primary); }
+  </style>
+</head>
+<body>
+  <header class="app-header" data-layout="cluster">
+    <h1>EPUB Reader <small id="book-subtitle">open a book to begin</small></h1>
+    <span class="samples">
+      Try the spec's example:
+      <a href="https://idpf.github.io/epub3-samples/30/samples.html" target="_blank" rel="noopener">EPUB 3 samples</a>
+    </span>
+    <label class="picker">
+      <span>Open EPUB&hellip;</span>
+      <input id="file" type="file" accept=".epub,application/epub+zip" />
+    </label>
+  </header>
+
+  <main id="app" data-layout="stack">
+    <epub-reader id="reader"></epub-reader>
+    <div class="drop-hint">Drop EPUB file to open</div>
+  </main>
+
+  <script type="module">
+    const reader = document.getElementById('reader');
+    const fileInput = document.getElementById('file');
+    const subtitle = document.getElementById('book-subtitle');
+    const body = document.body;
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (file) reader.open(file);
+      fileInput.value = '';
+    });
+
+    reader.addEventListener('epub-loaded', (e) => {
+      const { metadata, spineLength } = e.detail;
+      const parts = [];
+      if (metadata.title) parts.push(metadata.title);
+      if (metadata.creator) parts.push('by ' + metadata.creator);
+      parts.push(`(${spineLength} sections)`);
+      subtitle.textContent = parts.join(' ');
+    });
+    reader.addEventListener('epub-error', (e) => {
+      subtitle.textContent = 'Error: ' + (e.detail.error?.message || e.detail.error);
+    });
+
+    // Drag-and-drop anywhere in the window to open an EPUB.
+    let dragDepth = 0;
+    window.addEventListener('dragenter', (e) => {
+      if (!e.dataTransfer?.types?.includes('Files')) return;
+      dragDepth++; body.classList.add('dragging');
+    });
+    window.addEventListener('dragleave', () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) body.classList.remove('dragging');
+    });
+    window.addEventListener('dragover', (e) => {
+      if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+    });
+    window.addEventListener('drop', (e) => {
+      dragDepth = 0; body.classList.remove('dragging');
+      const file = e.dataTransfer?.files?.[0];
+      if (file && /\.epub$/i.test(file.name)) {
+        e.preventDefault();
+        reader.open(file);
+      }
+    });
+
+    // Accept `?src=<url>` in the query string for quick testing.
+    const q = new URLSearchParams(location.search);
+    if (q.has('src')) reader.setAttribute('src', q.get('src'));
+  </script>
+</body>
+</html>
