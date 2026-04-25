@@ -25,17 +25,96 @@ import { openEpub } from './epub.js';
 
 /**
  * @typedef {object} ReaderElements
- * @property {HTMLDivElement}     shell
- * @property {HTMLSpanElement}    title
- * @property {HTMLSpanElement}    progress
- * @property {HTMLButtonElement}  prev
- * @property {HTMLButtonElement}  next
- * @property {HTMLButtonElement}  toggle
- * @property {HTMLElement}        sidebar
- * @property {HTMLOListElement}   toc
- * @property {HTMLIFrameElement}  iframe
- * @property {HTMLDivElement}     overlay
+ * @property {HTMLDivElement}      shell
+ * @property {HTMLSpanElement}     title
+ * @property {HTMLSpanElement}     progress
+ * @property {HTMLButtonElement}   prev
+ * @property {HTMLButtonElement}   next
+ * @property {HTMLButtonElement}   toggle
+ * @property {HTMLButtonElement}   settingsToggle
+ * @property {HTMLElement}         sidebar
+ * @property {HTMLOListElement}    toc
+ * @property {HTMLIFrameElement}   iframe
+ * @property {HTMLDivElement}      overlay
+ * @property {HTMLElement}         settingsPanel
+ * @property {HTMLSelectElement}   sFontFamily
+ * @property {HTMLInputElement}    sFontSize
+ * @property {HTMLInputElement}    sLineHeight
+ * @property {HTMLInputElement}    sParagraphSpacing
+ * @property {HTMLInputElement}    sJustify
+ * @property {HTMLSpanElement}     sFontSizeV
+ * @property {HTMLSpanElement}     sLineHeightV
+ * @property {HTMLSpanElement}     sParagraphSpacingV
+ * @property {HTMLButtonElement}   sReset
+ * @property {HTMLButtonElement}   sClose
  */
+
+/**
+ * Typography overrides applied to chapter content. Sentinel values
+ * mean "publisher default" (no rule emitted): empty string for
+ * `fontFamily`, 0 for `lineHeight`, -1 for `paragraphSpacing`,
+ * `null` for `justify`.
+ *
+ * @typedef {object} TypographySettings
+ * @property {string}                fontFamily
+ * @property {number}                fontSize           Percent, default 100.
+ * @property {number}                lineHeight         0 = default.
+ * @property {number}                paragraphSpacing   -1 = default; else em.
+ * @property {boolean | null}        justify
+ */
+
+const TYPOGRAPHY_KEY = 'epub-reader:typography';
+
+/** @returns {TypographySettings} */
+function defaultTypography() {
+  return {
+    fontFamily: '',
+    fontSize: 100,
+    lineHeight: 0,
+    paragraphSpacing: -1,
+    justify: null,
+  };
+}
+
+/** @returns {TypographySettings} */
+function loadTypography() {
+  try {
+    const raw = globalThis.localStorage?.getItem(TYPOGRAPHY_KEY);
+    if (!raw) return defaultTypography();
+    const parsed = JSON.parse(raw);
+    return { ...defaultTypography(), ...parsed };
+  } catch { return defaultTypography(); }
+}
+
+/** @param {TypographySettings} t */
+function saveTypography(t) {
+  try { globalThis.localStorage?.setItem(TYPOGRAPHY_KEY, JSON.stringify(t)); }
+  catch { /* private mode, quota, etc. */ }
+}
+
+/** Build the CSS that overrides publisher typography for one chapter. */
+function buildTypographyCss(/** @type {TypographySettings} */ t) {
+  /** @type {string[]} */
+  const rules = [];
+  if (t.fontSize !== 100) {
+    rules.push(`html, body { font-size: ${t.fontSize}% !important; }`);
+  }
+  if (t.fontFamily) {
+    rules.push(`body, p, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6 { font-family: ${t.fontFamily} !important; }`);
+    // Don't override math glyphs — MathML relies on the math font.
+    rules.push(`math, math * { font-family: revert !important; }`);
+  }
+  if (t.lineHeight > 0) {
+    rules.push(`body, p, li, blockquote { line-height: ${t.lineHeight / 100} !important; }`);
+  }
+  if (t.paragraphSpacing >= 0) {
+    rules.push(`p, li { margin-block-end: ${t.paragraphSpacing / 10}em !important; }`);
+  }
+  if (t.justify !== null) {
+    rules.push(`body, p { text-align: ${t.justify ? 'justify' : 'start'} !important; }`);
+  }
+  return rules.join('\n');
+}
 
 const TEMPLATE = `
 <style>
@@ -161,6 +240,65 @@ const TEMPLATE = `
   .overlay .message { max-inline-size: 32rem; }
   .overlay.error { color: #b42318; }
 
+  /* Typography settings panel */
+  .settings-panel {
+    position: absolute;
+    inset-block-start: calc(100% + .25rem);
+    inset-inline-end: .5rem;
+    z-index: 4;
+    inline-size: min(20rem, calc(100vw - 1rem));
+    background: var(--reader-bg);
+    color: var(--reader-fg);
+    border: 1px solid var(--reader-border);
+    border-radius: .5rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+    padding: .75rem;
+    display: grid;
+    gap: .6rem;
+    font-size: .9rem;
+  }
+  .settings-panel[hidden] { display: none; }
+  .settings-panel h3 {
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--reader-muted);
+    margin: 0;
+  }
+  .settings-panel label {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: .25rem .75rem;
+    align-items: center;
+  }
+  .settings-panel label .value {
+    color: var(--reader-muted);
+    font-variant-numeric: tabular-nums;
+    font-size: .85em;
+  }
+  .settings-panel select,
+  .settings-panel input[type="range"] {
+    grid-column: 1 / -1;
+    inline-size: 100%;
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--reader-border);
+    border-radius: .25rem;
+    padding: .25rem .35rem;
+  }
+  .settings-panel input[type="range"] { padding: 0; }
+  .settings-panel .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+  }
+  .settings-panel .row.checkbox label {
+    grid-template-columns: auto 1fr;
+    gap: .5rem;
+  }
+
   @container (inline-size < 40rem) {
     .shell { grid-template-columns: 1fr; }
     .sidebar { display: none; position: absolute; inset: 3rem 0 0 0; z-index: 1; inline-size: min(20rem, 90%); box-shadow: 0 4px 16px rgba(0,0,0,.1); }
@@ -172,6 +310,7 @@ const TEMPLATE = `
     <button class="icon toc-toggle" type="button" aria-label="Toggle table of contents" title="Table of contents">&#9776;</button>
     <span class="title" part="title"></span>
     <span class="progress" part="progress"></span>
+    <button class="icon settings-toggle" type="button" aria-label="Reading settings" aria-expanded="false" title="Reading settings">Aa</button>
     <button class="prev" type="button" aria-label="Previous chapter">&larr;</button>
     <button class="next" type="button" aria-label="Next chapter">&rarr;</button>
   </div>
@@ -180,6 +319,45 @@ const TEMPLATE = `
     <ol class="toc" part="toc"></ol>
   </aside>
   <div class="content" part="content">
+    <aside class="settings-panel" part="settings" role="dialog" aria-label="Reading settings" hidden>
+      <h3>Reading settings</h3>
+      <label>
+        <span>Font</span>
+        <select class="s-font-family">
+          <option value="">Publisher default</option>
+          <option value="system-ui, sans-serif">System sans</option>
+          <option value="Georgia, 'Times New Roman', serif">Serif (Georgia)</option>
+          <option value="'Iowan Old Style', 'Palatino Linotype', Palatino, serif">Serif (Iowan)</option>
+          <option value="'Helvetica Neue', Arial, sans-serif">Helvetica</option>
+          <option value="Verdana, sans-serif">Verdana</option>
+          <option value="'Atkinson Hyperlegible', system-ui, sans-serif">Atkinson Hyperlegible</option>
+          <option value="'OpenDyslexic', system-ui, sans-serif">OpenDyslexic</option>
+          <option value="ui-monospace, 'Fira Code', monospace">Monospace</option>
+        </select>
+      </label>
+      <label>
+        <span>Font size</span><span class="value s-font-size-v"></span>
+        <input class="s-font-size" type="range" min="80" max="200" step="5" />
+      </label>
+      <label>
+        <span>Line height</span><span class="value s-line-height-v"></span>
+        <input class="s-line-height" type="range" min="100" max="220" step="5" />
+      </label>
+      <label>
+        <span>Paragraph spacing</span><span class="value s-paragraph-spacing-v"></span>
+        <input class="s-paragraph-spacing" type="range" min="-1" max="20" step="1" />
+      </label>
+      <div class="row checkbox">
+        <label>
+          <input class="s-justify" type="checkbox" />
+          <span>Justify text</span>
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" class="s-reset">Reset</button>
+        <button type="button" class="s-close primary">Done</button>
+      </div>
+    </aside>
     <iframe part="iframe" sandbox="allow-same-origin" title="EPUB content"></iframe>
     <div class="overlay" part="overlay">
       <div class="message">Drop an EPUB file here or choose one to begin.</div>
@@ -194,6 +372,7 @@ export class EpubReaderElement extends HTMLElement {
   /** @type {ShadowRoot} */          #shadow;
   /** @type {ReaderElements} */      #els;
   /** @type {EpubBook | null} */     #book = null;
+  /** @type {TypographySettings} */  #typography = loadTypography();
   #currentIndex = -1;
   #loadToken = 0;
 
@@ -205,22 +384,37 @@ export class EpubReaderElement extends HTMLElement {
       (sel) => /** @type {any} */ (this.#shadow.querySelector(sel))
     );
     this.#els = {
-      shell:    $('.shell'),
-      title:    $('.title'),
-      progress: $('.progress'),
-      prev:     $('.prev'),
-      next:     $('.next'),
-      toggle:   $('.toc-toggle'),
-      sidebar:  $('.sidebar'),
-      toc:      $('.toc'),
-      iframe:   $('iframe'),
-      overlay:  $('.overlay'),
+      shell:              $('.shell'),
+      title:              $('.title'),
+      progress:           $('.progress'),
+      prev:               $('.prev'),
+      next:               $('.next'),
+      toggle:             $('.toc-toggle'),
+      settingsToggle:     $('.settings-toggle'),
+      sidebar:            $('.sidebar'),
+      toc:                $('.toc'),
+      iframe:             $('iframe'),
+      overlay:            $('.overlay'),
+      settingsPanel:      $('.settings-panel'),
+      sFontFamily:        $('.s-font-family'),
+      sFontSize:          $('.s-font-size'),
+      sLineHeight:        $('.s-line-height'),
+      sParagraphSpacing:  $('.s-paragraph-spacing'),
+      sJustify:           $('.s-justify'),
+      sFontSizeV:         $('.s-font-size-v'),
+      sLineHeightV:       $('.s-line-height-v'),
+      sParagraphSpacingV: $('.s-paragraph-spacing-v'),
+      sReset:             $('.s-reset'),
+      sClose:             $('.s-close'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
     this.#els.toggle.addEventListener('click', () => this.#toggleToc());
+    this.#els.settingsToggle.addEventListener('click', () => this.#toggleSettings());
     this.#els.iframe.addEventListener('load', () => this.#onIframeLoad());
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
+    this.#wireSettingsControls();
+    this.#syncSettingsControls();
     this.tabIndex = 0;
   }
 
@@ -408,6 +602,9 @@ export class EpubReaderElement extends HTMLElement {
     const doc = iframe.contentDocument;
     if (!doc) return;
 
+    // Apply typography overrides before paint to avoid a visible reflow.
+    this.#applyTypographyTo(doc);
+
     // Intercept in-book navigation via [data-epub-href] (set by epub.js).
     doc.addEventListener('click', (e) => {
       const target = /** @type {Element | null} */ (e.target);
@@ -429,6 +626,25 @@ export class EpubReaderElement extends HTMLElement {
     }
   }
 
+  /**
+   * Inject (or update) the typography override <style> in a chapter doc.
+   * @param {Document} doc
+   */
+  #applyTypographyTo(doc) {
+    // SVG-in-spine documents have no <head>; nothing to do.
+    if (doc.documentElement?.localName === 'svg') return;
+    const head = doc.head || doc.documentElement;
+    if (!head) return;
+    const id = '__epub_reader_typography';
+    let style = /** @type {HTMLStyleElement | null} */ (doc.getElementById(id));
+    if (!style) {
+      style = doc.createElement('style');
+      style.id = id;
+      head.append(style);
+    }
+    style.textContent = buildTypographyCss(this.#typography);
+  }
+
   #onKeyDown(e) {
     if (!this.#book) return;
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -444,6 +660,83 @@ export class EpubReaderElement extends HTMLElement {
     this.#els.shell.classList.toggle('toc-open');
     // In wide layouts, collapse the sidebar column.
     this.#els.shell.classList.toggle('toc-hidden');
+  }
+
+  // ------- typography -------
+
+  /** Current typography overrides. Returns a clone so external mutation can't leak. */
+  get typography() { return { ...this.#typography }; }
+
+  /**
+   * Replace the current typography overrides. Persists to localStorage,
+   * fires `epub-typography-change`, and re-applies to the current chapter.
+   * @param {Partial<TypographySettings>} value
+   */
+  set typography(value) {
+    this.#typography = { ...defaultTypography(), ...this.#typography, ...value };
+    saveTypography(this.#typography);
+    this.#syncSettingsControls();
+    const doc = this.#els.iframe.contentDocument;
+    if (doc) this.#applyTypographyTo(doc);
+    this.dispatchEvent(new CustomEvent('epub-typography-change', {
+      detail: { typography: { ...this.#typography } },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  /** Reset typography overrides to publisher defaults. */
+  resetTypography() { this.typography = defaultTypography(); }
+
+  #toggleSettings(force) {
+    const open = typeof force === 'boolean' ? force : this.#els.settingsPanel.hidden;
+    this.#els.settingsPanel.hidden = !open;
+    this.#els.settingsToggle.setAttribute('aria-expanded', String(open));
+    if (open) this.#els.sFontFamily.focus();
+  }
+
+  #wireSettingsControls() {
+    const e = this.#els;
+    /** @param {Partial<TypographySettings>} patch */
+    const update = (patch) => { this.typography = patch; };
+    e.sFontFamily.addEventListener('change', () => update({ fontFamily: e.sFontFamily.value }));
+    e.sFontSize.addEventListener('input', () => update({ fontSize: Number(e.sFontSize.value) }));
+    e.sLineHeight.addEventListener('input', () => {
+      const v = Number(e.sLineHeight.value);
+      update({ lineHeight: v <= 100 ? 0 : v });
+    });
+    e.sParagraphSpacing.addEventListener('input', () => {
+      const v = Number(e.sParagraphSpacing.value);
+      update({ paragraphSpacing: v < 0 ? -1 : v });
+    });
+    e.sJustify.addEventListener('change', () => update({ justify: e.sJustify.checked }));
+    e.sReset.addEventListener('click', () => this.resetTypography());
+    e.sClose.addEventListener('click', () => this.#toggleSettings(false));
+
+    // Close panel on outside click.
+    this.addEventListener('pointerdown', (ev) => {
+      if (e.settingsPanel.hidden) return;
+      const path = ev.composedPath();
+      if (path.includes(e.settingsPanel) || path.includes(e.settingsToggle)) return;
+      this.#toggleSettings(false);
+    });
+  }
+
+  /** Sync the panel inputs to reflect the current typography state. */
+  #syncSettingsControls() {
+    const e = this.#els;
+    if (!e?.sFontFamily) return;
+    const t = this.#typography;
+    e.sFontFamily.value = t.fontFamily;
+    e.sFontSize.value = String(t.fontSize);
+    e.sFontSizeV.textContent = `${t.fontSize}%`;
+    e.sLineHeight.value = String(t.lineHeight || 100);
+    e.sLineHeightV.textContent = t.lineHeight ? (t.lineHeight / 100).toFixed(2) : 'default';
+    e.sParagraphSpacing.value = String(t.paragraphSpacing);
+    e.sParagraphSpacingV.textContent = t.paragraphSpacing < 0
+      ? 'default'
+      : `${(t.paragraphSpacing / 10).toFixed(1)}em`;
+    e.sJustify.checked = !!t.justify;
+    e.sJustify.indeterminate = t.justify === null;
   }
 
   #setOverlay(message, isError = false) {
