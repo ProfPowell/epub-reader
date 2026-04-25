@@ -177,6 +177,11 @@ test('internal anchor click navigates between spine items', async (h, { page }) 
     const p = r.shadowRoot.querySelector('.progress')?.textContent;
     return p && p !== startProgress;
   }, before.progress, { timeout: 5_000 });
+  // Progress updated synchronously, but the iframe load + render may not
+  // have completed yet — wait for the destination chapter's content too.
+  await h.waitChapter((doc) =>
+    (doc.body && doc.body.children.length > 0) || doc.documentElement?.localName === 'svg'
+  );
   const after = await h.iframeContent();
   truthy(after.bodyText.length > 0 || after.svgRoot, 'destination chapter should have content');
 });
@@ -246,6 +251,87 @@ test('epub-navigate event fires with index + path on chapter change', async (h, 
   truthy(events.length >= 1, 'expected at least one epub-navigate event');
   eq(events[events.length - 1].index, 1);
   truthy(events[events.length - 1].path, 'navigate detail should include path');
+});
+
+test('typography: assigning settings injects a style block in the chapter', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => {
+    document.getElementById('reader').typography = {
+      fontFamily: 'Georgia, serif',
+      fontSize: 130,
+      lineHeight: 160,
+    };
+  });
+  const computed = await page.evaluate(() => {
+    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    const style = doc.getElementById('__epub_reader_typography');
+    const cs = doc.defaultView.getComputedStyle(doc.body);
+    const p = doc.querySelector('p');
+    const csp = p ? doc.defaultView.getComputedStyle(p) : null;
+    return {
+      hasStyle: !!style,
+      cssText:  style?.textContent || '',
+      bodyFont: cs.fontFamily,
+      pLineH:   csp?.lineHeight,
+      htmlSize: doc.defaultView.getComputedStyle(doc.documentElement).fontSize,
+    };
+  });
+  truthy(computed.hasStyle, 'typography style element should be present');
+  truthy(/Georgia/.test(computed.bodyFont), `body font-family should include Georgia, got ${computed.bodyFont}`);
+  // 130% of 16px = 20.8px (browsers may round).
+  truthy(/^2[01](\.\d+)?px$/.test(computed.htmlSize), `html font-size ~20.8px, got ${computed.htmlSize}`);
+});
+
+test('typography: reset clears the override style', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    r.typography = { fontSize: 150 };
+    r.resetTypography();
+  });
+  const cssText = await page.evaluate(() => {
+    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    const style = doc.getElementById('__epub_reader_typography');
+    return style?.textContent || '';
+  });
+  eq(cssText.trim(), '', 'reset should leave an empty stylesheet');
+});
+
+test('typography: settings persist across reloads and apply to next book', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    document.getElementById('reader').typography = { fontSize: 125, fontFamily: 'Verdana, sans-serif' };
+  });
+  // Reload the page; settings should restore from localStorage.
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.setInputFiles('#file', join(SAMPLES, 'trees.epub'));
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return r?.shadowRoot?.querySelector('.title')?.textContent;
+  });
+  await h.waitChapter((doc) => doc.body?.children?.length > 0);
+  const settings = await page.evaluate(() => document.getElementById('reader').typography);
+  eq(settings.fontSize, 125, 'fontSize should restore from localStorage');
+  matches(settings.fontFamily, /Verdana/, 'fontFamily should restore');
+  // Reset for the next test (localStorage persists across pages within the context).
+  await page.evaluate(() => document.getElementById('reader').resetTypography());
+});
+
+test('typography: panel toggle button shows/hides the settings panel', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const initiallyOpen = await page.evaluate(() => {
+    const p = document.getElementById('reader').shadowRoot.querySelector('.settings-panel');
+    return !p.hidden;
+  });
+  eq(initiallyOpen, false, 'panel should start hidden');
+  await page.evaluate(() => {
+    document.getElementById('reader').shadowRoot.querySelector('.settings-toggle').click();
+  });
+  const opened = await page.evaluate(() => {
+    const p = document.getElementById('reader').shadowRoot.querySelector('.settings-panel');
+    return !p.hidden;
+  });
+  eq(opened, true, 'clicking settings-toggle should open the panel');
 });
 
 // ---------- runner ----------

@@ -66,11 +66,30 @@ export interface EpubErrorDetail {
   error: unknown;
 }
 
+/**
+ * Typography overrides applied to chapter content. Sentinel values
+ * mean "publisher default": empty string for `fontFamily`, 0 for
+ * `lineHeight`, -1 for `paragraphSpacing`, null for `justify`.
+ */
+export interface TypographySettings {
+  fontFamily:       string;
+  fontSize:         number;       // percent (e.g. 100 = default)
+  lineHeight:       number;       // 0 = default; 100..220 (×0.01)
+  paragraphSpacing: number;       // -1 = default; 0..20 (×0.1 em)
+  justify:          boolean | null;
+}
+
+/** Detail payload for the `epub-typography-change` event. */
+export interface EpubTypographyChangeDetail {
+  typography: TypographySettings;
+}
+
 /** Map of events emitted by <epub-reader> to their CustomEvent detail types. */
 export interface EpubReaderEventMap {
-  'epub-loaded':   CustomEvent<EpubLoadedDetail>;
-  'epub-navigate': CustomEvent<EpubNavigateDetail>;
-  'epub-error':    CustomEvent<EpubErrorDetail>;
+  'epub-loaded':              CustomEvent<EpubLoadedDetail>;
+  'epub-navigate':            CustomEvent<EpubNavigateDetail>;
+  'epub-error':               CustomEvent<EpubErrorDetail>;
+  'epub-typography-change':   CustomEvent<EpubTypographyChangeDetail>;
 }
 
 /** Programmatic source accepted by `open()`. */
@@ -105,6 +124,17 @@ export class EpubReaderElement extends HTMLElement {
 
   /** Jump to a manifest path (with optional `#fragment`). */
   goToPath(pathOrHref: string): Promise<void>;
+
+  /**
+   * Reader-applied typography overrides. Reading returns a clone;
+   * assigning a partial value merges with the current settings,
+   * persists to localStorage, fires `epub-typography-change`, and
+   * re-applies to the visible chapter immediately.
+   */
+  typography: TypographySettings;
+
+  /** Reset typography overrides to publisher defaults. */
+  resetTypography(): void;
 
   // Typed event helpers — work just like HTMLElement's, but resolve event
   // names against EpubReaderEventMap so CustomEvent.detail is typed.
