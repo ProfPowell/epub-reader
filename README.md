@@ -3,6 +3,8 @@
 A rudimentary EPUB reader built from vanilla web platform primitives.
 No build step, no npm dependencies, no frameworks.
 
+**Live demo:** <https://profpowell.github.io/epub-reader/>
+
 It ships in two forms:
 
 1. **App** — `index.html` is a drop-in viewer with file picker, drag-and-drop,
@@ -32,6 +34,25 @@ Browsers won't load ES modules from `file://`. Serve the folder over HTTP:
 python3 -m http.server 8000
 # then open http://localhost:8000/
 ```
+
+The app shell shows a "Try a sample" bar populated from
+[`samples/demo.json`](samples/demo.json) — click any entry to load it
+without opening a file picker. Deep links work too:
+`?sample=moby-dick.epub` auto-loads on first paint.
+
+## Live demo (GitHub Pages)
+
+Pushes to `main` deploy the app to <https://profpowell.github.io/epub-reader/>
+via [`.github/workflows/pages.yml`](.github/workflows/pages.yml). The
+deploy artifact contains `index.html`, `src/`, and the demo sample subset
+listed in `samples/demo.json` — the full 163 MB test-fixture set stays in
+the repo for tests but isn't shipped to Pages.
+
+To add or remove a demo sample, edit `samples/demo.json`. The next push
+to `main` will rebuild the site with the updated set.
+
+The Pages site must be enabled in the repository settings: **Settings →
+Pages → Source: GitHub Actions**.
 
 ## Testing
 
