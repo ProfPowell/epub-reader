@@ -1,0 +1,3 @@
+{
+  "_comment": "Samples that are expected to fail until the referenced issue is fixed. The runner reports these as XFAIL (expected failure) and does not exit non-zero. If a sample on this list passes, it is reported as UNEXPECTED PASS — remove the entry."
+}

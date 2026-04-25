@@ -33,6 +33,41 @@ python3 -m http.server 8000
 # then open http://localhost:8000/
 ```
 
+## Testing
+
+The `samples/` directory contains the full IDPF EPUB 3 sample set
+(release 20230704). `npm test` walks every sample through the reader in
+headless Chromium and asserts that metadata, the spine, and the TOC
+parse and that the first chapter renders without errors.
+
+```sh
+npm install
+npx playwright install chromium  # once, to fetch the browser binary
+npm test
+```
+
+Filter to a subset with `--grep`, e.g. `node tests/run-samples.mjs --grep moby`.
+
+Known-failing samples (e.g. interactive bindings that need an unsandboxed
+iframe) are listed in `tests/known-failures.json` so they don't make the
+suite red. If a known-failure sample starts passing the runner reports it
+as `XPASS` — remove the entry.
+
+## Typechecking
+
+The codebase ships as plain ES modules but is fully annotated with JSDoc
+types and typechecked via the TypeScript compiler in `--checkJs` mode.
+There's no build step — `tsc` only verifies, never emits.
+
+```sh
+npm run typecheck
+```
+
+`src/epub-reader.d.ts` is the consumer-facing declaration file. It
+augments `HTMLElementTagNameMap` so TypeScript projects get strong types
+out of `document.querySelector('epub-reader')`, plus typed `addEventListener`
+overloads for `epub-loaded`, `epub-navigate`, and `epub-error`.
+
 ## Component API
 
 ```html
