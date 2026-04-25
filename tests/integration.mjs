@@ -334,6 +334,89 @@ test('typography: panel toggle button shows/hides the settings panel', async (h,
   eq(opened, true, 'clicking settings-toggle should open the panel');
 });
 
+test('theme: setting a theme applies to host attribute and chapter body', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => { document.getElementById('reader').theme = 'dark'; });
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.shadowRoot.querySelector('iframe').contentDocument;
+    const cs = doc.defaultView.getComputedStyle(doc.body);
+    return {
+      hostAttr:   r.getAttribute('data-theme'),
+      themeProp:  r.theme,
+      hasStyle:   !!doc.getElementById('__epub_reader_theme'),
+      bgColor:    cs.backgroundColor,
+      fgColor:    cs.color,
+    };
+  });
+  eq(state.hostAttr, 'dark', 'host data-theme should be set');
+  eq(state.themeProp, 'dark');
+  truthy(state.hasStyle, 'theme style element should be present');
+  // The dark preset bg is #17181b → rgb(23, 24, 27); fg #e9e9ec → rgb(233, 233, 236).
+  matches(state.bgColor, /rgb\(23, ?24, ?27\)/, `bg should be dark, got ${state.bgColor}`);
+  matches(state.fgColor, /rgb\(233, ?233, ?236\)/, `fg should be light, got ${state.fgColor}`);
+});
+
+test('theme: chapter link colour matches the preset', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => { document.getElementById('reader').theme = 'sepia'; });
+  const colour = await page.evaluate(() => {
+    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    let a = doc.querySelector('a');
+    if (!a) {
+      a = doc.createElement('a'); a.href = '#'; a.textContent = 'x';
+      doc.body.append(a);
+    }
+    return doc.defaultView.getComputedStyle(a).color;
+  });
+  // Sepia link #7c421d → rgb(124, 66, 29).
+  matches(colour, /rgb\(124, ?66, ?29\)/, `sepia link should match preset, got ${colour}`);
+});
+
+test('theme: auto emits prefers-color-scheme media query', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => { document.getElementById('reader').theme = 'auto'; });
+  const css = await page.evaluate(() => {
+    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    return doc.getElementById('__epub_reader_theme')?.textContent || '';
+  });
+  matches(css, /@media \(prefers-color-scheme: dark\)/, 'auto theme should emit @media block');
+  // Both tokens should appear (light branch + dark branch).
+  truthy(css.includes('#fbfaf7'), 'should contain light bg');
+  truthy(css.includes('#17181b'), 'should contain dark bg');
+});
+
+test('theme: setting persists across reload', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => { document.getElementById('reader').theme = 'sepia'; });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const restored = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return { theme: r.theme, hostAttr: r.getAttribute('data-theme') };
+  });
+  eq(restored.theme, 'sepia');
+  eq(restored.hostAttr, 'sepia');
+  // Reset for subsequent runs.
+  await page.evaluate(() => { document.getElementById('reader').theme = 'auto'; });
+});
+
+test('theme: custom CSS variable on host overrides preset bg', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  // Override --reader-theme-bg on the host, then activate a theme. The
+  // chapter CSS reads the resolved value from the host.
+  await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    r.style.setProperty('--reader-theme-bg', '#102030');
+    r.theme = 'light';
+  });
+  const bg = await page.evaluate(() => {
+    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    return doc.defaultView.getComputedStyle(doc.body).backgroundColor;
+  });
+  // #102030 → rgb(16, 32, 48)
+  matches(bg, /rgb\(16, ?32, ?48\)/, `custom bg override should win, got ${bg}`);
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;

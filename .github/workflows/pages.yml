@@ -1,8 +1,10 @@
 name: deploy-pages
 
+# Manual-only trigger. GitHub Pages is unavailable on private repos
+# without a paid plan, so we don't auto-run on push (it would fail noisily).
+# To deploy: Actions tab → "deploy-pages" → "Run workflow", once Pages is
+# enabled in repo settings (Settings → Pages → Source: GitHub Actions).
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

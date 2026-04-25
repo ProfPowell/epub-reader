@@ -84,12 +84,25 @@ export interface EpubTypographyChangeDetail {
   typography: TypographySettings;
 }
 
+/**
+ * Reader theme. `auto` follows the OS via `prefers-color-scheme`; the
+ * other values are explicit and persisted. The set of valid values
+ * matches the `data-theme` attribute on the host element.
+ */
+export type Theme = 'auto' | 'light' | 'sepia' | 'dark' | 'high-contrast';
+
+/** Detail payload for the `epub-theme-change` event. */
+export interface EpubThemeChangeDetail {
+  theme: Theme;
+}
+
 /** Map of events emitted by <epub-reader> to their CustomEvent detail types. */
 export interface EpubReaderEventMap {
   'epub-loaded':              CustomEvent<EpubLoadedDetail>;
   'epub-navigate':            CustomEvent<EpubNavigateDetail>;
   'epub-error':               CustomEvent<EpubErrorDetail>;
   'epub-typography-change':   CustomEvent<EpubTypographyChangeDetail>;
+  'epub-theme-change':        CustomEvent<EpubThemeChangeDetail>;
 }
 
 /** Programmatic source accepted by `open()`. */
@@ -135,6 +148,22 @@ export class EpubReaderElement extends HTMLElement {
 
   /** Reset typography overrides to publisher defaults. */
   resetTypography(): void;
+
+  /**
+   * Active theme. Setting persists to localStorage, fires
+   * `epub-theme-change`, applies to the reader chrome via the host's
+   * `data-theme` attribute, and re-applies the chapter stylesheet.
+   *
+   * Custom themes: set CSS variables on the host element to override
+   * any preset's tokens (`--reader-theme-bg`, `--reader-theme-fg`,
+   * `--reader-theme-link`, `--reader-theme-muted`, `--reader-theme-border`,
+   * `--reader-theme-accent`). The 'auto' theme intentionally ignores
+   * those overrides so it can switch with the OS.
+   */
+  theme: Theme;
+
+  /** Frozen list of theme names accepted by the `theme` setter. */
+  readonly availableThemes: readonly Theme[];
 
   // Typed event helpers — work just like HTMLElement's, but resolve event
   // names against EpubReaderEventMap so CustomEvent.detail is typed.

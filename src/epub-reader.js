@@ -37,6 +37,7 @@ import { openEpub } from './epub.js';
  * @property {HTMLIFrameElement}   iframe
  * @property {HTMLDivElement}      overlay
  * @property {HTMLElement}         settingsPanel
+ * @property {HTMLSelectElement}   sTheme
  * @property {HTMLSelectElement}   sFontFamily
  * @property {HTMLInputElement}    sFontSize
  * @property {HTMLInputElement}    sLineHeight
@@ -64,6 +65,107 @@ import { openEpub } from './epub.js';
  */
 
 const TYPOGRAPHY_KEY = 'epub-reader:typography';
+const THEME_KEY = 'epub-reader:theme';
+
+/** @type {readonly Theme[]} */
+const THEMES = /** @type {const} */ (['auto', 'light', 'sepia', 'dark', 'high-contrast']);
+
+/**
+ * Per-theme baseline tokens used to build chapter-iframe stylesheets. The
+ * host shadow CSS holds the same values as `:host([data-theme=...])` rules;
+ * we duplicate them here because CSS variables don't pierce iframe boundaries
+ * — the chapter CSS has to be self-contained.
+ *
+ * @type {Record<Exclude<Theme, 'auto'>, ThemeTokens>}
+ */
+const THEME_TOKENS = {
+  light: {
+    bg: '#fbfaf7', fg: '#1f1f1f', link: '#2d6cdf',
+    muted: '#667085', border: '#e4e4e7', accent: '#2d6cdf',
+  },
+  sepia: {
+    bg: '#f4ecd8', fg: '#5b4636', link: '#7c421d',
+    muted: '#8a7762', border: '#d8c9a3', accent: '#7c421d',
+  },
+  dark: {
+    bg: '#17181b', fg: '#e9e9ec', link: '#79b1ff',
+    muted: '#9aa0a6', border: '#2a2c31', accent: '#79b1ff',
+  },
+  'high-contrast': {
+    bg: '#000', fg: '#fff', link: '#ffe66d',
+    muted: '#ccc', border: '#fff', accent: '#ffe66d',
+  },
+};
+
+/**
+ * @typedef {'auto' | 'light' | 'sepia' | 'dark' | 'high-contrast'} Theme
+ *
+ * @typedef {object} ThemeTokens
+ * @property {string} bg
+ * @property {string} fg
+ * @property {string} link
+ * @property {string} muted
+ * @property {string} border
+ * @property {string} accent
+ */
+
+/** @returns {Theme} */
+function loadTheme() {
+  try {
+    const raw = globalThis.localStorage?.getItem(THEME_KEY);
+    if (raw && THEMES.includes(/** @type {Theme} */ (raw))) return /** @type {Theme} */ (raw);
+  } catch { /* fall through */ }
+  return 'auto';
+}
+
+/** @param {Theme} t */
+function saveTheme(t) {
+  try { globalThis.localStorage?.setItem(THEME_KEY, t); } catch { /* private mode, quota, etc. */ }
+}
+
+/**
+ * Build chapter-iframe theme CSS. For 'auto' we emit two blocks gated on
+ * `prefers-color-scheme: dark` so the chapter follows OS theme changes
+ * without our needing to re-inject. For explicit themes, prefer values
+ * read from the host element so user CSS-variable overrides win.
+ *
+ * @param {Theme} theme
+ * @param {Element} host  Used to resolve --reader-theme-* overrides.
+ * @returns {string}
+ */
+function buildThemeCss(theme, host) {
+  if (theme === 'auto') {
+    return [
+      themeBlock(THEME_TOKENS.light, ''),
+      `@media (prefers-color-scheme: dark) {`,
+      themeBlock(THEME_TOKENS.dark, '  '),
+      `}`,
+    ].join('\n');
+  }
+  const cs = host.ownerDocument?.defaultView?.getComputedStyle(host);
+  const baseline = THEME_TOKENS[theme];
+  /** @param {keyof ThemeTokens} key @param {string} cssVar */
+  const pick = (key, cssVar) => cs?.getPropertyValue(cssVar).trim() || baseline[key];
+  return themeBlock({
+    bg:     pick('bg',     '--reader-theme-bg'),
+    fg:     pick('fg',     '--reader-theme-fg'),
+    link:   pick('link',   '--reader-theme-link'),
+    muted:  pick('muted',  '--reader-theme-muted'),
+    border: pick('border', '--reader-theme-border'),
+    accent: pick('accent', '--reader-theme-accent'),
+  }, '');
+}
+
+/** @param {ThemeTokens} t @param {string} indent */
+function themeBlock(t, indent) {
+  return [
+    `${indent}html, body { background-color: ${t.bg} !important; color: ${t.fg} !important; }`,
+    `${indent}a, a:link { color: ${t.link} !important; }`,
+    `${indent}a:visited { color: color-mix(in srgb, ${t.link} 70%, ${t.fg}) !important; }`,
+    `${indent}hr { border-color: ${t.border} !important; }`,
+    `${indent}::selection { background-color: color-mix(in srgb, ${t.accent} 30%, transparent); }`,
+  ].join('\n');
+}
 
 /** @returns {TypographySettings} */
 function defaultTypography() {
@@ -118,12 +220,27 @@ function buildTypographyCss(/** @type {TypographySettings} */ t) {
 
 const TEMPLATE = `
 <style>
+  /* --reader-theme-* are the public theme tokens. Consumers can override
+     them on the host element to define a custom theme. The :host blocks
+     below set them from a preset for each data-theme value. The remaining
+     --reader-* tokens map to them so existing chrome rules pick up the
+     theme automatically. */
   :host {
-    --reader-bg:        var(--vb-color-surface, #fbfaf7);
-    --reader-fg:        var(--vb-color-text, #1f1f1f);
-    --reader-muted:     var(--vb-color-muted, #667085);
-    --reader-accent:    var(--vb-color-primary, #2d6cdf);
-    --reader-border:    var(--vb-color-border, #e4e4e7);
+    /* Default ("auto"): track the OS theme via prefers-color-scheme,
+       falling back to vanilla-breeze tokens / spec defaults. */
+    --reader-theme-bg:           var(--vb-color-surface, #fbfaf7);
+    --reader-theme-fg:           var(--vb-color-text,    #1f1f1f);
+    --reader-theme-muted:        var(--vb-color-muted,   #667085);
+    --reader-theme-accent:       var(--vb-color-primary, #2d6cdf);
+    --reader-theme-link:         var(--reader-theme-accent);
+    --reader-theme-link-visited: color-mix(in srgb, var(--reader-theme-link) 70%, var(--reader-theme-fg));
+    --reader-theme-border:       var(--vb-color-border,  #e4e4e7);
+
+    --reader-bg:        var(--reader-theme-bg);
+    --reader-fg:        var(--reader-theme-fg);
+    --reader-muted:     var(--reader-theme-muted);
+    --reader-accent:    var(--reader-theme-accent);
+    --reader-border:    var(--reader-theme-border);
     --reader-sidebar-w: 18rem;
     --reader-font:      var(--vb-font-body, system-ui, -apple-system, "Segoe UI", sans-serif);
     --reader-content-font: var(--reader-font);
@@ -136,6 +253,40 @@ const TEMPLATE = `
     background: var(--reader-bg);
     font-family: var(--reader-font);
     container-type: inline-size;
+  }
+
+  /* Preset themes. Each one sets the public --reader-theme-* tokens. */
+  :host([data-theme="light"]) {
+    --reader-theme-bg:     #fbfaf7;
+    --reader-theme-fg:     #1f1f1f;
+    --reader-theme-muted:  #667085;
+    --reader-theme-accent: #2d6cdf;
+    --reader-theme-link:   #2d6cdf;
+    --reader-theme-border: #e4e4e7;
+  }
+  :host([data-theme="sepia"]) {
+    --reader-theme-bg:     #f4ecd8;
+    --reader-theme-fg:     #5b4636;
+    --reader-theme-muted:  #8a7762;
+    --reader-theme-accent: #7c421d;
+    --reader-theme-link:   #7c421d;
+    --reader-theme-border: #d8c9a3;
+  }
+  :host([data-theme="dark"]) {
+    --reader-theme-bg:     #17181b;
+    --reader-theme-fg:     #e9e9ec;
+    --reader-theme-muted:  #9aa0a6;
+    --reader-theme-accent: #79b1ff;
+    --reader-theme-link:   #79b1ff;
+    --reader-theme-border: #2a2c31;
+  }
+  :host([data-theme="high-contrast"]) {
+    --reader-theme-bg:     #000;
+    --reader-theme-fg:     #fff;
+    --reader-theme-muted:  #ccc;
+    --reader-theme-accent: #ffe66d;
+    --reader-theme-link:   #ffe66d;
+    --reader-theme-border: #fff;
   }
 
   .shell {
@@ -223,7 +374,7 @@ const TEMPLATE = `
     block-size: 100%;
     border: 0;
     display: block;
-    background: white;
+    background: var(--reader-theme-bg);
   }
 
   .overlay {
@@ -322,6 +473,16 @@ const TEMPLATE = `
     <aside class="settings-panel" part="settings" role="dialog" aria-label="Reading settings" hidden>
       <h3>Reading settings</h3>
       <label>
+        <span>Theme</span>
+        <select class="s-theme">
+          <option value="auto">Auto (follow system)</option>
+          <option value="light">Light</option>
+          <option value="sepia">Sepia</option>
+          <option value="dark">Dark</option>
+          <option value="high-contrast">High contrast</option>
+        </select>
+      </label>
+      <label>
         <span>Font</span>
         <select class="s-font-family">
           <option value="">Publisher default</option>
@@ -373,6 +534,7 @@ export class EpubReaderElement extends HTMLElement {
   /** @type {ReaderElements} */      #els;
   /** @type {EpubBook | null} */     #book = null;
   /** @type {TypographySettings} */  #typography = loadTypography();
+  /** @type {Theme} */               #theme = loadTheme();
   #currentIndex = -1;
   #loadToken = 0;
 
@@ -396,6 +558,7 @@ export class EpubReaderElement extends HTMLElement {
       iframe:             $('iframe'),
       overlay:            $('.overlay'),
       settingsPanel:      $('.settings-panel'),
+      sTheme:             $('.s-theme'),
       sFontFamily:        $('.s-font-family'),
       sFontSize:          $('.s-font-size'),
       sLineHeight:        $('.s-line-height'),
@@ -415,6 +578,7 @@ export class EpubReaderElement extends HTMLElement {
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
     this.#wireSettingsControls();
     this.#syncSettingsControls();
+    this.#applyThemeToHost();
     this.tabIndex = 0;
   }
 
@@ -602,7 +766,8 @@ export class EpubReaderElement extends HTMLElement {
     const doc = iframe.contentDocument;
     if (!doc) return;
 
-    // Apply typography overrides before paint to avoid a visible reflow.
+    // Apply theme + typography overrides before paint to avoid a visible reflow.
+    this.#applyThemeTo(doc);
     this.#applyTypographyTo(doc);
 
     // Intercept in-book navigation via [data-epub-href] (set by epub.js).
@@ -687,6 +852,60 @@ export class EpubReaderElement extends HTMLElement {
   /** Reset typography overrides to publisher defaults. */
   resetTypography() { this.typography = defaultTypography(); }
 
+  // ------- theme -------
+
+  /** @returns {Theme} */
+  get theme() { return this.#theme; }
+
+  /**
+   * @param {Theme} value  One of `auto | light | sepia | dark | high-contrast`.
+   *                       Unknown values fall back to `auto`.
+   */
+  set theme(value) {
+    const next = THEMES.includes(value) ? value : 'auto';
+    if (next === this.#theme) return;
+    this.#theme = next;
+    saveTheme(next);
+    this.#applyThemeToHost();
+    this.#syncSettingsControls();
+    const doc = this.#els.iframe.contentDocument;
+    if (doc) this.#applyThemeTo(doc);
+    this.dispatchEvent(new CustomEvent('epub-theme-change', {
+      detail: { theme: next },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  /** @returns {readonly Theme[]} */
+  get availableThemes() { return THEMES; }
+
+  /** Set the host's `data-theme` attribute for the shadow CSS to pick up. */
+  #applyThemeToHost() {
+    if (this.#theme === 'auto') this.removeAttribute('data-theme');
+    else this.setAttribute('data-theme', this.#theme);
+  }
+
+  /**
+   * Inject (or update) the theme override <style> in a chapter doc.
+   * @param {Document} doc
+   */
+  #applyThemeTo(doc) {
+    if (doc.documentElement?.localName === 'svg') return;
+    const head = doc.head || doc.documentElement;
+    if (!head) return;
+    const id = '__epub_reader_theme';
+    let style = /** @type {HTMLStyleElement | null} */ (doc.getElementById(id));
+    if (!style) {
+      style = doc.createElement('style');
+      style.id = id;
+      // Insert before any other styles so publisher CSS can still override
+      // selectors that don't use !important; we rely on !important only for
+      // the body bg/fg and link colours, which always need to win.
+      head.insertBefore(style, head.firstChild);
+    }
+    style.textContent = buildThemeCss(this.#theme, this);
+  }
+
   #toggleSettings(force) {
     const open = typeof force === 'boolean' ? force : this.#els.settingsPanel.hidden;
     this.#els.settingsPanel.hidden = !open;
@@ -698,6 +917,9 @@ export class EpubReaderElement extends HTMLElement {
     const e = this.#els;
     /** @param {Partial<TypographySettings>} patch */
     const update = (patch) => { this.typography = patch; };
+    e.sTheme.addEventListener('change', () => {
+      this.theme = /** @type {Theme} */ (e.sTheme.value);
+    });
     e.sFontFamily.addEventListener('change', () => update({ fontFamily: e.sFontFamily.value }));
     e.sFontSize.addEventListener('input', () => update({ fontSize: Number(e.sFontSize.value) }));
     e.sLineHeight.addEventListener('input', () => {
@@ -721,11 +943,12 @@ export class EpubReaderElement extends HTMLElement {
     });
   }
 
-  /** Sync the panel inputs to reflect the current typography state. */
+  /** Sync the panel inputs to reflect the current typography + theme state. */
   #syncSettingsControls() {
     const e = this.#els;
     if (!e?.sFontFamily) return;
     const t = this.#typography;
+    e.sTheme.value = this.#theme;
     e.sFontFamily.value = t.fontFamily;
     e.sFontSize.value = String(t.fontSize);
     e.sFontSizeV.textContent = `${t.fontSize}%`;
