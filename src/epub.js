@@ -101,7 +101,7 @@ export class EpubBook {
       rights:      pick('rights'),
     };
     // EPUB 2 cover: <meta name="cover" content="<manifest-id>"/>
-    for (const m of metadata.getElementsByTagName('meta')) {
+    for (const m of childrenByLocalName(metadata, 'meta')) {
       if (m.getAttribute('name') === 'cover') {
         this.#coverId = m.getAttribute('content');
       }
@@ -112,7 +112,7 @@ export class EpubBook {
     const manifest = doc.getElementsByTagNameNS(NS.opf, 'manifest')[0]
       || doc.getElementsByTagName('manifest')[0];
     if (!manifest) throw new Error('OPF: missing <manifest>');
-    for (const item of manifest.getElementsByTagName('item')) {
+    for (const item of childrenByLocalName(manifest, 'item')) {
       const id = item.getAttribute('id');
       const href = item.getAttribute('href');
       const mediaType = item.getAttribute('media-type') || '';
@@ -131,7 +131,7 @@ export class EpubBook {
       || doc.getElementsByTagName('spine')[0];
     if (!spine) throw new Error('OPF: missing <spine>');
     let i = 0;
-    for (const ref of spine.getElementsByTagName('itemref')) {
+    for (const ref of childrenByLocalName(spine, 'itemref')) {
       const idref = ref.getAttribute('idref');
       if (!idref) continue;
       const item = this.#manifest.get(idref);
@@ -401,6 +401,15 @@ export class EpubBook {
 }
 
 // ---------- helpers ----------
+
+// Find descendant elements by local name regardless of XML namespace prefix.
+// EPUB OPFs in the wild are inconsistent: some use the default namespace
+// (`<item>`), others a prefix (`<opf:item>`). `getElementsByTagName` matches
+// the qualified name, so it misses prefixed elements. `getElementsByTagNameNS`
+// with `*` matches across all namespaces and is the right primitive here.
+function childrenByLocalName(parent, localName) {
+  return parent.getElementsByTagNameNS('*', localName);
+}
 
 function parseXml(text, mime = 'application/xml') {
   const doc = new DOMParser().parseFromString(text, mime);

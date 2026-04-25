@@ -1,0 +1,11 @@
+{
+  "_comment": "Samples that are expected to fail until the referenced issue is fixed. The runner reports these as XFAIL (expected failure) and does not exit non-zero. If a sample on this list passes, it is reported as UNEXPECTED PASS — remove the entry.",
+  "figure-gallery-bindings.epub": {
+    "issue": 6,
+    "reason": "Uses <embed> plugin elements which require allow-scripts in the iframe sandbox."
+  },
+  "quiz-bindings.epub": {
+    "issue": 6,
+    "reason": "Interactive quiz uses scripted bindings; needs sandbox allow-scripts opt-in."
+  }
+}
