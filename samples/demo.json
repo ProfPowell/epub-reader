@@ -1,0 +1,41 @@
+{
+  "_comment": "Curated subset of samples included in the GitHub Pages deploy. Keep total size small — the live demo doesn't need every fixture, just enough to exercise prose, RTL, images, and a long spine.",
+  "samples": [
+    {
+      "file": "trees.epub",
+      "title": "Trees",
+      "description": "Tiny baseline EPUB 3",
+      "size": "74 KB"
+    },
+    {
+      "file": "wasteland.epub",
+      "title": "The Waste Land",
+      "description": "T.S. Eliot — typography baseline",
+      "size": "99 KB"
+    },
+    {
+      "file": "moby-dick.epub",
+      "title": "Moby-Dick",
+      "description": "144-chapter novel",
+      "size": "1.6 MB"
+    },
+    {
+      "file": "regime-anticancer-arabic.epub",
+      "title": "RTL Arabic",
+      "description": "Right-to-left text",
+      "size": "108 KB"
+    },
+    {
+      "file": "haruko-html-jpeg.epub",
+      "title": "Manga",
+      "description": "Image-heavy chapters",
+      "size": "2.1 MB"
+    },
+    {
+      "file": "linear-algebra.epub",
+      "title": "Linear Algebra",
+      "description": "MathML content",
+      "size": "1.0 MB"
+    }
+  ]
+}

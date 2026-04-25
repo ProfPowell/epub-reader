@@ -102,20 +102,63 @@
       font-size: .9rem;
     }
     .samples a { color: var(--vb-color-primary); }
+
+    .sample-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .4rem;
+      align-items: center;
+      padding: .5rem 1rem;
+      border-block-end: 1px solid var(--vb-color-border);
+      background: var(--vb-color-surface);
+      font-size: .85rem;
+    }
+    .sample-bar[hidden] { display: none; }
+    .sample-bar .label {
+      color: var(--vb-color-muted);
+      margin-inline-end: .25rem;
+    }
+    .sample-bar button {
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid var(--vb-color-border);
+      border-radius: .35rem;
+      padding: .25rem .55rem;
+      cursor: pointer;
+      display: inline-flex;
+      gap: .35rem;
+      align-items: baseline;
+    }
+    .sample-bar button:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--vb-color-primary) 8%, transparent);
+    }
+    .sample-bar button.current {
+      border-color: var(--vb-color-primary);
+      background: color-mix(in srgb, var(--vb-color-primary) 12%, transparent);
+    }
+    .sample-bar button:disabled { opacity: .5; cursor: progress; }
+    .sample-bar .size {
+      color: var(--vb-color-muted);
+      font-size: .85em;
+    }
   </style>
 </head>
 <body>
   <header class="app-header" data-layout="cluster">
-    <h1>EPUB Reader <small id="book-subtitle">open a book to begin</small></h1>
+    <h1>EPUB Reader <small id="book-subtitle">choose a sample below or open your own</small></h1>
     <span class="samples">
-      Try the spec's example:
-      <a href="https://idpf.github.io/epub3-samples/30/samples.html" target="_blank" rel="noopener">EPUB 3 samples</a>
+      <a href="https://github.com/ProfPowell/epub-reader" target="_blank" rel="noopener">View on GitHub</a>
     </span>
     <label class="picker">
       <span>Open EPUB&hellip;</span>
       <input id="file" type="file" accept=".epub,application/epub+zip" />
     </label>
   </header>
+
+  <nav class="sample-bar" id="sample-bar" hidden aria-label="Sample books">
+    <span class="label">Try a sample:</span>
+  </nav>
 
   <main id="app" data-layout="stack">
     <epub-reader id="reader"></epub-reader>
@@ -126,11 +169,12 @@
     const reader = document.getElementById('reader');
     const fileInput = document.getElementById('file');
     const subtitle = document.getElementById('book-subtitle');
+    const sampleBar = document.getElementById('sample-bar');
     const body = document.body;
 
     fileInput.addEventListener('change', (e) => {
       const file = e.target.files?.[0];
-      if (file) reader.open(file);
+      if (file) { reader.open(file); markCurrent(null); }
       fileInput.value = '';
     });
 
@@ -145,6 +189,53 @@
     reader.addEventListener('epub-error', (e) => {
       subtitle.textContent = 'Error: ' + (e.detail.error?.message || e.detail.error);
     });
+
+    // Sample picker. Reads samples/demo.json and shows a button per entry.
+    // The same manifest drives the GitHub Pages deploy (workflow copies
+    // every file referenced here into the deploy artifact).
+    /** @type {Promise<any>} */
+    const manifestPromise = fetch('./samples/demo.json', { cache: 'no-cache' })
+      .then(res => res.ok ? res.json() : null)
+      .catch(() => null);
+
+    manifestPromise.then((manifest) => {
+      if (!manifest?.samples?.length) return;
+      sampleBar.hidden = false;
+      for (const s of manifest.samples) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.dataset.file = s.file;
+        btn.title = s.description || s.title;
+        btn.innerHTML = `<span>${s.title}</span><span class="size">${s.size || ''}</span>`;
+        btn.addEventListener('click', () => loadSample(s.file, btn));
+        sampleBar.append(btn);
+      }
+    });
+
+    /**
+     * Fetch a sample from the deployed `samples/` directory and open it.
+     * Using a Blob avoids a second round-trip via the reader's URL fetch.
+     */
+    async function loadSample(file, btn) {
+      const buttons = [...sampleBar.querySelectorAll('button')];
+      buttons.forEach(b => b.disabled = true);
+      try {
+        const res = await fetch(`./samples/${encodeURIComponent(file)}`, { cache: 'force-cache' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        await reader.open(blob);
+        markCurrent(btn);
+      } catch (err) {
+        subtitle.textContent = 'Failed to load sample: ' + (err.message || err);
+      } finally {
+        buttons.forEach(b => b.disabled = false);
+      }
+    }
+
+    function markCurrent(btn) {
+      for (const b of sampleBar.querySelectorAll('button')) b.classList.remove('current');
+      if (btn) btn.classList.add('current');
+    }
 
     // Drag-and-drop anywhere in the window to open an EPUB.
     let dragDepth = 0;
@@ -165,12 +256,27 @@
       if (file && /\.epub$/i.test(file.name)) {
         e.preventDefault();
         reader.open(file);
+        markCurrent(null);
       }
     });
 
-    // Accept `?src=<url>` in the query string for quick testing.
+    // Query-string overrides:
+    //   ?src=<url>     auto-load an arbitrary URL via the reader's fetch path
+    //   ?sample=<file> auto-load one of the bundled demo samples by name
     const q = new URLSearchParams(location.search);
-    if (q.has('src')) reader.setAttribute('src', q.get('src'));
+    if (q.has('src')) {
+      reader.setAttribute('src', q.get('src'));
+    } else if (q.has('sample')) {
+      manifestPromise.then((manifest) => {
+        if (!manifest) return;
+        const want = q.get('sample');
+        const match = manifest.samples.find(s => s.file === want || s.title === want);
+        if (match) {
+          const btn = sampleBar.querySelector(`button[data-file="${CSS.escape(match.file)}"]`);
+          loadSample(match.file, btn);
+        }
+      });
+    }
   </script>
 </body>
 </html>

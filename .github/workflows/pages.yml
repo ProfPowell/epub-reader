@@ -1,0 +1,63 @@
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one in-flight deploy. Don't cancel in-progress runs so a
+# completed deploy isn't truncated by a follow-up push.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage site
+        run: |
+          set -euo pipefail
+          mkdir -p _site/src _site/samples _site/examples
+
+          # App shell + reader source.
+          cp index.html _site/
+          cp src/*.js src/*.d.ts _site/src/
+          cp examples/*.html _site/examples/ 2>/dev/null || true
+
+          # Demo manifest + only the samples it references. Keeps the
+          # deploy under a few MB instead of shipping the full 163 MB
+          # test-fixture set.
+          cp samples/demo.json _site/samples/
+          for f in $(jq -r '.samples[].file' samples/demo.json); do
+            cp "samples/$f" "_site/samples/$f"
+          done
+
+          # 404 fallback so spurious paths still land on the reader.
+          cp index.html _site/404.html
+
+          du -sh _site
+          ls -la _site _site/src _site/samples
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
