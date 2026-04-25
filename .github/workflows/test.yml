@@ -19,6 +19,8 @@ jobs:
 
       - run: npm install --no-audit --no-fund
 
+      - run: npm run typecheck
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         id: pw-cache

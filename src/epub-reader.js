@@ -20,6 +20,22 @@
 //   epub-error       detail: { error }
 
 import { openEpub } from './epub.js';
+/** @typedef {import('./epub.js').EpubBook} EpubBook */
+/** @typedef {import('./epub.js').TocEntry} TocEntry */
+
+/**
+ * @typedef {object} ReaderElements
+ * @property {HTMLDivElement}     shell
+ * @property {HTMLSpanElement}    title
+ * @property {HTMLSpanElement}    progress
+ * @property {HTMLButtonElement}  prev
+ * @property {HTMLButtonElement}  next
+ * @property {HTMLButtonElement}  toggle
+ * @property {HTMLElement}        sidebar
+ * @property {HTMLOListElement}   toc
+ * @property {HTMLIFrameElement}  iframe
+ * @property {HTMLDivElement}     overlay
+ */
 
 const TEMPLATE = `
 <style>
@@ -175,9 +191,9 @@ const TEMPLATE = `
 export class EpubReaderElement extends HTMLElement {
   static get observedAttributes() { return ['src', 'start', 'hide-toc']; }
 
-  #shadow;
-  #els;
-  #book = null;
+  /** @type {ShadowRoot} */          #shadow;
+  /** @type {ReaderElements} */      #els;
+  /** @type {EpubBook | null} */     #book = null;
   #currentIndex = -1;
   #loadToken = 0;
 
@@ -185,17 +201,20 @@ export class EpubReaderElement extends HTMLElement {
     super();
     this.#shadow = this.attachShadow({ mode: 'open' });
     this.#shadow.innerHTML = TEMPLATE;
+    const $ = /** @type {<T extends Element>(sel: string) => T} */ (
+      (sel) => /** @type {any} */ (this.#shadow.querySelector(sel))
+    );
     this.#els = {
-      shell:    this.#shadow.querySelector('.shell'),
-      title:    this.#shadow.querySelector('.title'),
-      progress: this.#shadow.querySelector('.progress'),
-      prev:     this.#shadow.querySelector('.prev'),
-      next:     this.#shadow.querySelector('.next'),
-      toggle:   this.#shadow.querySelector('.toc-toggle'),
-      sidebar:  this.#shadow.querySelector('.sidebar'),
-      toc:      this.#shadow.querySelector('.toc'),
-      iframe:   this.#shadow.querySelector('iframe'),
-      overlay:  this.#shadow.querySelector('.overlay'),
+      shell:    $('.shell'),
+      title:    $('.title'),
+      progress: $('.progress'),
+      prev:     $('.prev'),
+      next:     $('.next'),
+      toggle:   $('.toc-toggle'),
+      sidebar:  $('.sidebar'),
+      toc:      $('.toc'),
+      iframe:   $('iframe'),
+      overlay:  $('.overlay'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
@@ -206,7 +225,8 @@ export class EpubReaderElement extends HTMLElement {
   }
 
   connectedCallback() {
-    if (this.hasAttribute('src')) this.open(this.getAttribute('src'));
+    const src = this.getAttribute('src');
+    if (src) this.open(src);
   }
 
   disconnectedCallback() {
@@ -220,6 +240,12 @@ export class EpubReaderElement extends HTMLElement {
 
   // ------- public API -------
 
+  /**
+   * Load an EPUB. Replaces any currently-open book. Fires `epub-loaded`
+   * on success, `epub-error` on failure.
+   * @param {string | Blob | ArrayBuffer | ArrayBufferView} source
+   * @returns {Promise<void>}
+   */
   async open(source) {
     const token = ++this.#loadToken;
     this.close();
@@ -255,6 +281,7 @@ export class EpubReaderElement extends HTMLElement {
     }
   }
 
+  /** Unload the current book and revoke any blob URLs it created. */
   close() {
     this.#currentIndex = -1;
     if (this.#book) { this.#book.destroy(); this.#book = null; }
@@ -266,16 +293,24 @@ export class EpubReaderElement extends HTMLElement {
     this.#setOverlay('Drop an EPUB file here or choose one to begin.');
   }
 
-  async next()    { if (this.#book && this.#currentIndex + 1 < this.#book.spine.length) await this.goToIndex(this.#currentIndex + 1); }
-  async prev()    { if (this.#book && this.#currentIndex > 0) await this.goToIndex(this.#currentIndex - 1); }
+  /** Advance to the next spine item. No-op if already at the last. */
+  async next() { if (this.#book && this.#currentIndex + 1 < this.#book.spine.length) await this.goToIndex(this.#currentIndex + 1); }
 
+  /** Move to the previous spine item. No-op if already at the first. */
+  async prev() { if (this.#book && this.#currentIndex > 0) await this.goToIndex(this.#currentIndex - 1); }
+
+  /**
+   * @param {number} index
+   * @param {string} [fragment='']
+   * @returns {Promise<void>}
+   */
   async goToIndex(index, fragment = '') {
     if (!this.#book) return;
     const spine = this.#book.spine;
     if (index < 0 || index >= spine.length) return;
     this.#currentIndex = index;
     const chapter = await this.#book.chapter(index);
-    this.#els.iframe.dataset.fragment = fragment || '';
+    this.#els.iframe.dataset.fragment = fragment;
     this.#els.iframe.src = chapter.url;
     this.#updateChrome();
     this.dispatchEvent(new CustomEvent('epub-navigate', {
@@ -289,9 +324,11 @@ export class EpubReaderElement extends HTMLElement {
     }));
   }
 
+  /** @param {string} pathOrHref */
   async goToPath(pathOrHref) {
     if (!this.#book) return;
-    const [rawPath, fragment] = pathOrHref.split('#');
+    const [rawPath, fragmentRaw] = pathOrHref.split('#');
+    const fragment = fragmentRaw ?? '';
     let path = rawPath;
     try { path = decodeURIComponent(rawPath); } catch {}
     let idx = this.#book.spineIndexOf(path);
@@ -299,14 +336,14 @@ export class EpubReaderElement extends HTMLElement {
       // Non-spine target (e.g. landmarks) — still try to open it directly.
       try {
         const url = await this.#book.resourceUrl(path);
-        this.#els.iframe.dataset.fragment = fragment || '';
+        this.#els.iframe.dataset.fragment = fragment;
         this.#els.iframe.src = url;
       } catch (err) {
         console.warn('goToPath failed', err);
       }
       return;
     }
-    await this.goToIndex(idx, fragment || '');
+    await this.goToIndex(idx, fragment);
   }
 
   // ------- internals -------
@@ -336,7 +373,7 @@ export class EpubReaderElement extends HTMLElement {
         a.dataset.fragment = item.fragment || '';
         a.addEventListener('click', (e) => {
           e.preventDefault();
-          if (!item.path) return;
+          if (!item.path || !this.#book) return;
           const idx = this.#book.spineIndexOf(item.path);
           if (idx >= 0) this.goToIndex(idx, item.fragment);
           else this.goToPath(item.path + (item.fragment ? '#' + item.fragment : ''));
@@ -373,11 +410,12 @@ export class EpubReaderElement extends HTMLElement {
 
     // Intercept in-book navigation via [data-epub-href] (set by epub.js).
     doc.addEventListener('click', (e) => {
-      const a = e.target.closest?.('[data-epub-href]');
+      const target = /** @type {Element | null} */ (e.target);
+      const a = target?.closest?.('[data-epub-href]');
       if (!a) return;
       e.preventDefault();
       const href = a.getAttribute('data-epub-href');
-      this.goToPath(href);
+      if (href) this.goToPath(href);
     });
 
     // Scroll to the requested fragment, if any.
@@ -411,7 +449,8 @@ export class EpubReaderElement extends HTMLElement {
   #setOverlay(message, isError = false) {
     const ov = this.#els.overlay;
     ov.classList.toggle('error', isError);
-    ov.querySelector('.message').textContent = message;
+    const messageEl = ov.querySelector('.message');
+    if (messageEl) messageEl.textContent = message;
     ov.hidden = false;
   }
   #hideOverlay() { this.#els.overlay.hidden = true; }

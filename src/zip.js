@@ -2,6 +2,16 @@
 // Supports: stored (0) and deflate (8). No ZIP64, no encryption.
 // Enough for nearly every EPUB in the wild.
 
+/**
+ * @typedef {object} ZipEntry
+ * @property {string} name
+ * @property {number} method            ZIP compression method (0=stored, 8=deflate).
+ * @property {number} crc32
+ * @property {number} compressedSize
+ * @property {number} uncompressedSize
+ * @property {number} localHeader       Byte offset of the local file header.
+ */
+
 const SIG_EOCD = 0x06054b50;
 const SIG_CDH  = 0x02014b50;
 const SIG_LFH  = 0x04034b50;
@@ -10,22 +20,31 @@ const MAX_COMMENT = 0xffff;
 const EOCD_MIN = 22;
 
 export class ZipArchive {
-  #bytes;
-  #view;
-  #entries;
+  /** @type {Uint8Array} */         #bytes;
+  /** @type {DataView} */            #view;
+  /** @type {Map<string, ZipEntry>} */ #entries;
 
+  /** @param {ArrayBuffer} arrayBuffer */
   constructor(arrayBuffer) {
     this.#bytes = new Uint8Array(arrayBuffer);
     this.#view = new DataView(arrayBuffer);
     this.#entries = new Map();
   }
 
+  /**
+   * Parse a ZIP archive from any binary source.
+   * @param {ArrayBuffer | ArrayBufferView | Blob} source
+   * @returns {Promise<ZipArchive>}
+   */
   static async from(source) {
+    /** @type {ArrayBuffer} */
     let buf;
     if (source instanceof ArrayBuffer) {
       buf = source;
     } else if (ArrayBuffer.isView(source)) {
-      buf = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
+      buf = /** @type {ArrayBuffer} */ (
+        source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength)
+      );
     } else if (source instanceof Blob) {
       buf = await source.arrayBuffer();
     } else {
@@ -36,10 +55,15 @@ export class ZipArchive {
     return zip;
   }
 
+  /** @returns {string[]} All entry names in the archive. */
   get names() {
     return [...this.#entries.keys()];
   }
 
+  /**
+   * @param {string} name
+   * @returns {boolean}
+   */
   has(name) {
     return this.#entries.has(name);
   }
@@ -107,6 +131,7 @@ export class ZipArchive {
     }
   }
 
+  /** @param {ZipEntry} entry */
   #entryData(entry) {
     const view = this.#view;
     const bytes = this.#bytes;
@@ -120,6 +145,11 @@ export class ZipArchive {
     return bytes.subarray(dataStart, dataStart + entry.compressedSize);
   }
 
+  /**
+   * Read and decompress an entry as raw bytes.
+   * @param {string} name
+   * @returns {Promise<Uint8Array>}
+   */
   async read(name) {
     const entry = this.#entries.get(name);
     if (!entry) throw new Error(`ZIP entry not found: ${name}`);
@@ -134,17 +164,34 @@ export class ZipArchive {
     throw new Error(`Unsupported ZIP compression method ${entry.method} for ${name}`);
   }
 
+  /**
+   * Read an entry and decode it as text.
+   * @param {string} name
+   * @param {string} [encoding='utf-8']
+   * @returns {Promise<string>}
+   */
   async readText(name, encoding = 'utf-8') {
     const bytes = await this.read(name);
     return new TextDecoder(encoding).decode(bytes);
   }
 
+  /**
+   * Read an entry and wrap it in a Blob with the given MIME type.
+   * @param {string} name
+   * @param {string} [type='application/octet-stream']
+   * @returns {Promise<Blob>}
+   */
   async blob(name, type = 'application/octet-stream') {
     const bytes = await this.read(name);
-    return new Blob([bytes], { type });
+    return new Blob([/** @type {BlobPart} */ (bytes)], { type });
   }
 }
 
+/**
+ * @param {Uint8Array} bytes
+ * @param {number} flags ZIP general-purpose bit flag.
+ * @returns {string}
+ */
 function decodeName(bytes, flags) {
   // Bit 11 (0x0800) = UTF-8 filenames. Most modern ZIPs set it; EPUBs should.
   const utf8 = (flags & 0x0800) !== 0;
@@ -156,12 +203,16 @@ function decodeName(bytes, flags) {
   }
 }
 
+/**
+ * @param {Uint8Array} bytes
+ * @returns {Promise<Uint8Array>}
+ */
 async function inflateRaw(bytes) {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('DecompressionStream is not available in this environment');
   }
   const ds = new DecompressionStream('deflate-raw');
-  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  const stream = new Blob([/** @type {BlobPart} */ (bytes)]).stream().pipeThrough(ds);
   const out = await new Response(stream).arrayBuffer();
   return new Uint8Array(out);
 }

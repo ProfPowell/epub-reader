@@ -53,6 +53,21 @@ iframe) are listed in `tests/known-failures.json` so they don't make the
 suite red. If a known-failure sample starts passing the runner reports it
 as `XPASS` — remove the entry.
 
+## Typechecking
+
+The codebase ships as plain ES modules but is fully annotated with JSDoc
+types and typechecked via the TypeScript compiler in `--checkJs` mode.
+There's no build step — `tsc` only verifies, never emits.
+
+```sh
+npm run typecheck
+```
+
+`src/epub-reader.d.ts` is the consumer-facing declaration file. It
+augments `HTMLElementTagNameMap` so TypeScript projects get strong types
+out of `document.querySelector('epub-reader')`, plus typed `addEventListener`
+overloads for `epub-loaded`, `epub-navigate`, and `epub-error`.
+
 ## Component API
 
 ```html

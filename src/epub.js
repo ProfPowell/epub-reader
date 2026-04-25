@@ -5,6 +5,48 @@
 
 import { ZipArchive } from './zip.js';
 
+/**
+ * @typedef {object} EpubMetadata
+ * @property {string} title
+ * @property {string} creator
+ * @property {string} language
+ * @property {string} identifier
+ * @property {string} publisher
+ * @property {string} description
+ * @property {string} date
+ * @property {string} rights
+ */
+
+/**
+ * @typedef {object} ManifestItem
+ * @property {string} id
+ * @property {string} href            Original href as it appears in the OPF.
+ * @property {string} path            Path resolved relative to the ZIP root.
+ * @property {string} mediaType
+ * @property {string} properties      Space-separated property tokens.
+ */
+
+/**
+ * @typedef {ManifestItem & {linear: boolean, index: number}} SpineItem
+ */
+
+/**
+ * @typedef {object} TocEntry
+ * @property {string} label
+ * @property {string} href            Original href.
+ * @property {string} path            Path resolved relative to the ZIP root.
+ * @property {string} fragment        Fragment identifier (no leading `#`).
+ * @property {TocEntry[]} children
+ */
+
+/**
+ * @typedef {object} Chapter
+ * @property {string} url             Blob URL for the chapter document.
+ * @property {string} path
+ * @property {number} index
+ * @property {boolean} linear
+ */
+
 const CONTAINER_PATH = 'META-INF/container.xml';
 const NS = {
   container: 'urn:oasis:names:tc:opendocument:xmlns:container',
@@ -20,7 +62,13 @@ const REWRITE_ATTRS = new Set([
   'src', 'href', 'poster', 'data',
 ]);
 
+/**
+ * Open an EPUB from a URL, Blob, or in-memory buffer.
+ * @param {string | Blob | ArrayBuffer | ArrayBufferView} source
+ * @returns {Promise<EpubBook>}
+ */
 export async function openEpub(source) {
+  /** @type {Blob} */
   let blob;
   if (typeof source === 'string') {
     const res = await fetch(source);
@@ -29,7 +77,7 @@ export async function openEpub(source) {
   } else if (source instanceof Blob) {
     blob = source;
   } else if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
-    blob = new Blob([source]);
+    blob = new Blob([/** @type {BlobPart} */ (source)]);
   } else {
     throw new TypeError('openEpub expects a URL string, Blob/File, or ArrayBuffer');
   }
@@ -40,17 +88,17 @@ export async function openEpub(source) {
 }
 
 export class EpubBook {
-  #zip;
-  #opfPath;
-  #opfDir;
-  #manifest = new Map();     // id -> { id, href, path, mediaType, properties }
-  #spine    = [];            // [{ id, href, path, linear, properties, index }]
-  #toc      = [];            // [{ label, href, path, fragment, children }]
-  #metadata = {};
-  #coverId  = null;
-  #navId    = null;
-  #blobUrls = new Map();     // path -> blob URL
-  #pending  = new Map();     // path -> Promise<string>
+  /** @type {ZipArchive} */                          #zip;
+  /** @type {string} */                              #opfPath = '';
+  /** @type {string} */                              #opfDir = '';
+  /** @type {Map<string, ManifestItem>} */           #manifest = new Map();
+  /** @type {SpineItem[]} */                         #spine    = [];
+  /** @type {TocEntry[]} */                          #toc      = [];
+  /** @type {EpubMetadata} */                        #metadata = blankMetadata();
+  /** @type {string | null} */                       #coverId  = null;
+  /** @type {string | null} */                       #navId    = null;
+  /** @type {Map<string, string>} */                 #blobUrls = new Map();
+  /** @type {Map<string, Promise<string>>} */        #pending  = new Map();
 
   constructor(zip) {
     this.#zip = zip;
@@ -64,8 +112,9 @@ export class EpubBook {
     const containerDoc = parseXml(containerXml, 'application/xml');
     const rootfile = containerDoc.getElementsByTagName('rootfile')[0];
     if (!rootfile) throw new Error('container.xml: no <rootfile> element');
-    this.#opfPath = rootfile.getAttribute('full-path');
-    if (!this.#opfPath) throw new Error('container.xml: rootfile missing full-path');
+    const fullPath = rootfile.getAttribute('full-path');
+    if (!fullPath) throw new Error('container.xml: rootfile missing full-path');
+    this.#opfPath = fullPath;
     this.#opfDir = dirname(this.#opfPath);
 
     const opfXml = await this.#zip.readText(this.#opfPath);
@@ -76,10 +125,17 @@ export class EpubBook {
     await this.#parseNav();
   }
 
-  get metadata()    { return { ...this.#metadata }; }
-  get spine()       { return this.#spine.map(x => ({ ...x })); }
-  get toc()         { return this.#toc; }
-  get manifest()    { return [...this.#manifest.values()].map(x => ({ ...x })); }
+  /** @returns {EpubMetadata} */
+  get metadata() { return { ...this.#metadata }; }
+
+  /** @returns {SpineItem[]} */
+  get spine() { return this.#spine.map(x => ({ ...x })); }
+
+  /** @returns {TocEntry[]} */
+  get toc() { return this.#toc; }
+
+  /** @returns {ManifestItem[]} */
+  get manifest() { return [...this.#manifest.values()].map(x => ({ ...x })); }
 
   #parseMetadata(doc) {
     const metadata = doc.getElementsByTagNameNS(NS.opf, 'metadata')[0]
@@ -118,8 +174,9 @@ export class EpubBook {
       const mediaType = item.getAttribute('media-type') || '';
       const properties = item.getAttribute('properties') || '';
       if (!id || !href) continue;
-      const path = resolveRelative(this.#opfPath, href).path;
-      const entry = { id, href, path, mediaType, properties };
+      const resolved = resolveRelative(this.#opfPath, href);
+      if (!resolved) continue;
+      const entry = { id, href, path: resolved.path, mediaType, properties };
       this.#manifest.set(id, entry);
       if (properties.split(/\s+/).includes('nav')) this.#navId = id;
       if (properties.split(/\s+/).includes('cover-image')) this.#coverId = id;
@@ -199,6 +256,10 @@ export class EpubBook {
 
   // ------- resource URLs -------
 
+  /**
+   * Blob URL for the cover image, or null if the OPF declares none.
+   * @returns {Promise<string | null>}
+   */
   async coverUrl() {
     if (!this.#coverId) return null;
     const item = this.#manifest.get(this.#coverId);
@@ -206,9 +267,17 @@ export class EpubBook {
     return await this.resourceUrl(item.path);
   }
 
+  /**
+   * Lazily build a blob: URL for an archive resource. HTML/CSS resources
+   * are processed to rewrite internal references.
+   * @param {string} path
+   * @returns {Promise<string>}
+   */
   async resourceUrl(path) {
-    if (this.#blobUrls.has(path)) return this.#blobUrls.get(path);
-    if (this.#pending.has(path))  return this.#pending.get(path);
+    const cached = this.#blobUrls.get(path);
+    if (cached) return cached;
+    const inflight = this.#pending.get(path);
+    if (inflight) return inflight;
 
     const p = (async () => {
       const item = this.#manifestByPath(path);
@@ -220,7 +289,7 @@ export class EpubBook {
         blob = await this.#processCss(path);
       } else {
         const bytes = await this.#zip.read(path);
-        blob = new Blob([bytes], { type: mediaType });
+        blob = new Blob([/** @type {BlobPart} */ (bytes)], { type: mediaType });
       }
       const url = URL.createObjectURL(blob);
       this.#blobUrls.set(path, url);
@@ -231,7 +300,11 @@ export class EpubBook {
     finally { this.#pending.delete(path); }
   }
 
-  // Spine-item URL and metadata. `index` is a spine index.
+  /**
+   * Spine-item URL and metadata.
+   * @param {number} index
+   * @returns {Promise<Chapter>}
+   */
   async chapter(index) {
     const item = this.#spine[index];
     if (!item) throw new RangeError(`Spine index out of range: ${index}`);
@@ -239,7 +312,11 @@ export class EpubBook {
     return { url, path: item.path, index, linear: item.linear };
   }
 
-  // Map a TOC path back to a spine index (for in-book link navigation).
+  /**
+   * Map a manifest path back to a spine index. Returns -1 if not in spine.
+   * @param {string} path
+   * @returns {number}
+   */
   spineIndexOf(path) {
     for (let i = 0; i < this.#spine.length; i++) {
       if (this.#spine[i].path === path) return i;
@@ -247,7 +324,7 @@ export class EpubBook {
     return -1;
   }
 
-  // Revoke all generated blob URLs. Call when the reader unloads a book.
+  /** Revoke all generated blob URLs. Call when the reader unloads a book. */
   destroy() {
     for (const url of this.#blobUrls.values()) URL.revokeObjectURL(url);
     this.#blobUrls.clear();
@@ -275,10 +352,12 @@ export class EpubBook {
 
     // Rewrite attributes that reference other resources in the archive.
     const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT);
+    /** @type {Promise<void>[]} */
     const tasks = [];
-    let node = walker.currentNode;
+    /** @type {Node | null} */
+    let node;
     while ((node = walker.nextNode())) {
-      tasks.push(this.#rewriteElement(node, path));
+      tasks.push(this.#rewriteElement(/** @type {Element} */ (node), path));
     }
     await Promise.all(tasks);
 
@@ -402,6 +481,11 @@ export class EpubBook {
 
 // ---------- helpers ----------
 
+/** @returns {EpubMetadata} */
+function blankMetadata() {
+  return { title: '', creator: '', language: '', identifier: '', publisher: '', description: '', date: '', rights: '' };
+}
+
 // Find descendant elements by local name regardless of XML namespace prefix.
 // EPUB OPFs in the wild are inconsistent: some use the default namespace
 // (`<item>`), others a prefix (`<opf:item>`). `getElementsByTagName` matches
@@ -411,6 +495,11 @@ function childrenByLocalName(parent, localName) {
   return parent.getElementsByTagNameNS('*', localName);
 }
 
+/**
+ * @param {string} text
+ * @param {DOMParserSupportedType} [mime='application/xml']
+ * @returns {Document}
+ */
 function parseXml(text, mime = 'application/xml') {
   const doc = new DOMParser().parseFromString(text, mime);
   const err = doc.getElementsByTagName('parsererror')[0];
