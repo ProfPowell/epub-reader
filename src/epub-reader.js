@@ -251,6 +251,15 @@ const COMPONENT_CSS = `
   }
   .toc a:hover { background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 10%, transparent); }
   .toc a.current { background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 16%, transparent); font-weight: 600; }
+  .toc .toc-heading {
+    display: block;
+    padding: 0.4rem 0.5rem 0.2rem;
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted, #667085);
+    font-weight: var(--font-weight-semibold, 600);
+  }
 
   .content { position: relative; overflow: hidden; background: var(--color-background, #fff); }
   iframe {
@@ -615,19 +624,29 @@ export class EpubReaderElement extends HTMLElement {
       const frag = document.createDocumentFragment();
       for (const item of items) {
         const li = document.createElement('li');
-        const a = document.createElement('a');
-        a.textContent = item.label;
-        a.href = '#';
-        a.dataset.path = item.path || '';
-        a.dataset.fragment = item.fragment || '';
-        a.addEventListener('click', (e) => {
-          e.preventDefault();
-          if (!item.path || !this.#book) return;
-          const idx = this.#book.spineIndexOf(item.path);
-          if (idx >= 0) this.goToIndex(idx, item.fragment);
-          else this.goToPath(item.path + (item.fragment ? '#' + item.fragment : ''));
-        });
-        li.append(a);
+        // EPUB nav docs use <span> (no href) for section group headings
+        // like author names. Render those as a non-link element so they
+        // aren't focusable as links and don't look clickable.
+        if (item.path) {
+          const a = document.createElement('a');
+          a.textContent = item.label;
+          a.href = '#';
+          a.dataset.path = item.path;
+          a.dataset.fragment = item.fragment || '';
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (!this.#book) return;
+            const idx = this.#book.spineIndexOf(item.path);
+            if (idx >= 0) this.goToIndex(idx, item.fragment);
+            else this.goToPath(item.path + (item.fragment ? '#' + item.fragment : ''));
+          });
+          li.append(a);
+        } else {
+          const heading = document.createElement('strong');
+          heading.className = 'toc-heading';
+          heading.textContent = item.label;
+          li.append(heading);
+        }
         if (item.children && item.children.length) {
           const sub = document.createElement('ol');
           sub.append(buildList(item.children));
@@ -675,12 +694,52 @@ export class EpubReaderElement extends HTMLElement {
     // Scroll to the requested fragment, if any.
     const frag = iframe.dataset.fragment;
     if (frag) {
-      const target = doc.getElementById(frag);
-      if (target) target.scrollIntoView();
+      this.#scrollToFragment(iframe, frag);
     } else {
       doc.documentElement.scrollTop = 0;
       if (doc.body) doc.body.scrollTop = 0;
     }
+  }
+
+  /**
+   * Reliably scroll to a fragment in the chapter iframe, handling the
+   * common race conditions:
+   *   1. The element isn't in the DOM yet when `iframe.load` fires
+   *      (deferred parsing). MutationObserver retries until it appears
+   *      or a budget elapses.
+   *   2. The element is in the DOM but layout hasn't settled because
+   *      images are still loading. After the initial scroll, we wait
+   *      for the iframe window's `load` event and scroll again so the
+   *      final layout lands on the right anchor.
+   *
+   * @param {HTMLIFrameElement} iframe
+   * @param {string} frag    Fragment identifier without leading `#`.
+   */
+  #scrollToFragment(iframe, frag) {
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    if (!doc || !win) return;
+
+    const tryScroll = () => {
+      const el = doc.getElementById(frag) || doc.querySelector(`[name="${CSS.escape(frag)}"]`);
+      if (el) el.scrollIntoView({ block: 'start' });
+      return !!el;
+    };
+
+    if (tryScroll()) {
+      // First scroll succeeded. After all subresources (images, fonts)
+      // load, the layout may shift — re-scroll once to land cleanly.
+      const onLoaded = () => { tryScroll(); win.removeEventListener('load', onLoaded); };
+      if (doc.readyState === 'complete') queueMicrotask(onLoaded);
+      else win.addEventListener('load', onLoaded, { once: true });
+      return;
+    }
+
+    // Element not in DOM yet — observe for it, with a budget.
+    const observer = new MutationObserver(() => { if (tryScroll()) { observer.disconnect(); cleanup(); } });
+    observer.observe(doc.documentElement, { childList: true, subtree: true });
+    const timer = setTimeout(() => { observer.disconnect(); }, 1500);
+    const cleanup = () => clearTimeout(timer);
   }
 
   /**
