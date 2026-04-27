@@ -5,8 +5,8 @@
 // doesn't persist for that session.
 
 const DB_NAME = 'epub-reader';
-const DB_VERSION = 1;
-const STORES = /** @type {const} */ (['positions']);
+const DB_VERSION = 2;
+const STORES = /** @type {const} */ (['positions', 'bookmarks', 'library']);
 
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null;
@@ -83,6 +83,39 @@ export async function dbDelete(store, key) {
     await new Promise((resolve, reject) => {
       const tx = db.transaction(store, 'readwrite');
       tx.objectStore(store).delete(key);
+      tx.oncomplete = () => resolve(undefined);
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch { /* swallow */ }
+}
+
+/**
+ * @template T
+ * @param {string} store
+ * @returns {Promise<T[]>}
+ */
+export async function dbGetAll(store) {
+  try {
+    const db = await openDB();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly');
+      const req = tx.objectStore(store).getAll();
+      req.onsuccess = () => resolve(/** @type {T[]} */ (req.result || []));
+      req.onerror = () => reject(req.error);
+    });
+  } catch { return []; }
+}
+
+/**
+ * @param {string} store
+ * @returns {Promise<void>}
+ */
+export async function dbClear(store) {
+  try {
+    const db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).clear();
       tx.oncomplete = () => resolve(undefined);
       tx.onerror = () => reject(tx.error);
     });

@@ -101,6 +101,22 @@ export interface EpubPositionRestoredDetail {
   bookId: string | null;
 }
 
+/** One user bookmark within a book. */
+export interface Bookmark {
+  id: string;
+  spineIndex: number;
+  scrollFraction: number;
+  chapterTitle: string;
+  label: string;
+  snippet: string;
+  createdAt: number;
+}
+
+/** Detail payload for the `epub-bookmarks-change` event. */
+export interface EpubBookmarksChangeDetail {
+  bookmarks: Bookmark[];
+}
+
 /** Map of events emitted by <epub-reader> to their CustomEvent detail types. */
 export interface EpubReaderEventMap {
   'epub-loaded':              CustomEvent<EpubLoadedDetail>;
@@ -108,6 +124,7 @@ export interface EpubReaderEventMap {
   'epub-error':               CustomEvent<EpubErrorDetail>;
   'epub-typography-change':   CustomEvent<EpubTypographyChangeDetail>;
   'epub-position-restored':   CustomEvent<EpubPositionRestoredDetail>;
+  'epub-bookmarks-change':    CustomEvent<EpubBookmarksChangeDetail>;
 }
 
 /** Programmatic source accepted by `open()`. */
@@ -158,6 +175,22 @@ export class EpubReaderElement extends HTMLElement {
 
   /** Reset typography overrides to publisher defaults. */
   resetTypography(): void;
+
+  /** Read-only snapshot of the current book's bookmarks. */
+  readonly bookmarks: Bookmark[];
+
+  /**
+   * Add a bookmark at the current position, or remove the existing
+   * bookmark there if one exists. Resolves with the new bookmark or
+   * `null` (when a bookmark was removed instead).
+   */
+  toggleBookmark(label?: string): Promise<Bookmark | null>;
+
+  /** Remove a bookmark by id. Resolves true if a bookmark was removed. */
+  removeBookmark(id: string): Promise<boolean>;
+
+  /** Jump to a bookmark (chapter + scroll position). */
+  goToBookmark(id: string): Promise<void>;
 
   // Theming is delegated to the host page's Vanilla Breeze theme
   // engine. The reader reads `--color-background`, `--color-text`,
