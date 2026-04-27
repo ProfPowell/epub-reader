@@ -284,9 +284,13 @@ test('typography: assigning settings injects a style block in the chapter', asyn
 
 test('typography: reset clears the override style', async (h, { page }) => {
   await h.openSample('wasteland.epub');
+  // resetTypography goes back to defaults (incl. fontSize 100, lineHeight 0,
+  // readingWidth 65 — a sensible default per #9). Verify the explicit
+  // overrides we set above don't survive: no font-size override, no
+  // font-family override.
   await page.evaluate(() => {
     const r = document.getElementById('reader');
-    r.typography = { fontSize: 150 };
+    r.typography = { fontSize: 150, fontFamily: 'Georgia, serif' };
     r.resetTypography();
   });
   const cssText = await page.evaluate(() => {
@@ -294,7 +298,8 @@ test('typography: reset clears the override style', async (h, { page }) => {
     const style = doc.getElementById('__epub_reader_typography');
     return style?.textContent || '';
   });
-  eq(cssText.trim(), '', 'reset should leave an empty stylesheet');
+  truthy(!/font-size:\s*150/.test(cssText), `reset should drop fontSize override, css=${cssText}`);
+  truthy(!/Georgia/.test(cssText), `reset should drop fontFamily override, css=${cssText}`);
 });
 
 test('typography: settings persist across reloads and apply to next book', async (h, { page }) => {
@@ -564,6 +569,164 @@ test('rendition:layout: reflowable chapters do NOT get the layout style', async 
     return !!doc.getElementById('__epub_reader_layout');
   });
   eq(present, false, 'reflowable chapter should not have a layout style injected');
+});
+
+test('sandbox: default is allow-same-origin only (issue #6)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const sb = await page.evaluate(() => document.getElementById('reader').querySelector('iframe').getAttribute('sandbox'));
+  eq(sb, 'allow-same-origin');
+});
+
+test('sandbox: allow-scripts attribute adds it to the iframe sandbox (issue #6)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').setAttribute('allow-scripts', ''));
+  const sb = await page.evaluate(() => document.getElementById('reader').querySelector('iframe').getAttribute('sandbox'));
+  matches(sb, /allow-same-origin/);
+  matches(sb, /allow-scripts/);
+  // Removing the attribute reverts.
+  await page.evaluate(() => document.getElementById('reader').removeAttribute('allow-scripts'));
+  const after = await page.evaluate(() => document.getElementById('reader').querySelector('iframe').getAttribute('sandbox'));
+  eq(after, 'allow-same-origin');
+});
+
+test('reading width: default 65 ch is applied to chapter body (issue #9)', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => document.getElementById('reader').resetTypography());
+  const css = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.getElementById('__epub_reader_typography')?.textContent || '';
+  });
+  matches(css, /max-inline-size:\s*65ch/, `default reading width should be 65ch, css=${css}`);
+  matches(css, /margin-inline:\s*auto/, 'should center the body');
+});
+
+test('reading width: 0 means unlimited — no max-inline-size rule (issue #9)', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => { document.getElementById('reader').typography = { readingWidth: 0 }; });
+  const css = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.getElementById('__epub_reader_typography')?.textContent || '';
+  });
+  truthy(!/max-inline-size/.test(css), `unlimited width should drop the rule, css=${css}`);
+});
+
+test('reading width: slider value persists across reloads (issue #9)', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => { document.getElementById('reader').typography = { readingWidth: 80 }; });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const w = await page.evaluate(() => document.getElementById('reader').typography.readingWidth);
+  eq(w, 80);
+  await page.evaluate(() => { document.getElementById('reader').resetTypography(); });
+});
+
+test('paginated mode: CSS columns are injected (issue #10)', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'paginated' }; });
+  const state = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    const style = doc.getElementById('__epub_reader_paginated');
+    const bodyCs = doc.body ? doc.defaultView.getComputedStyle(doc.body) : null;
+    return {
+      hasStyle:    !!style,
+      columnWidth: bodyCs?.columnWidth || '',
+      overflowX:   bodyCs?.overflowX || '',
+      overflowY:   bodyCs?.overflowY || '',
+    };
+  });
+  truthy(state.hasStyle, 'paginated style should be injected');
+  truthy(state.columnWidth !== '' && state.columnWidth !== 'auto',
+    `body should have column-width set, got ${state.columnWidth}`);
+  matches(state.overflowX, /auto|scroll/, 'body should be horizontally scrollable');
+  matches(state.overflowY, /hidden/, 'body should not scroll vertically');
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'scroll' }; });
+});
+
+test('paginated mode: page indicator shows "Page X of Y" (issue #10)', async (h, { page }) => {
+  // childrens-literature.epub has one long chapter that produces many
+  // columns when paginated.
+  await h.openSample('childrens-literature.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(2));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'paginated' }; });
+  // Wait for the body to settle into columns and the indicator to update.
+  await page.waitForFunction(() => {
+    const txt = document.getElementById('reader').querySelector('.chapter-progress').textContent;
+    return /^Page \d+ of \d+$/.test(txt);
+  }, null, { timeout: 5_000 });
+  const text = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.chapter-progress').textContent);
+  matches(text, /^Page 1 of \d+$/, `expected "Page 1 of N", got ${JSON.stringify(text)}`);
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'scroll' }; });
+});
+
+test('paginated mode: ArrowRight pages within the chapter (issue #10)', async (h, { page }) => {
+  await h.openSample('childrens-literature.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(2));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'paginated' }; });
+  await page.waitForFunction(() => {
+    const t = document.getElementById('reader').querySelector('.chapter-progress').textContent;
+    return /^Page 1 of/.test(t);
+  }, null, { timeout: 5_000 });
+
+  // Dispatch ArrowRight on the host. Should advance one PAGE (not chapter).
+  const beforeSpine = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'ArrowRight', bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const t = document.getElementById('reader').querySelector('.chapter-progress').textContent;
+    return /^Page 2 of/.test(t);
+  }, null, { timeout: 3_000 });
+  const afterSpine = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  eq(afterSpine, beforeSpine, 'spine progress should not change on page-turn within a chapter');
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'scroll' }; });
+});
+
+test('paginated mode: forward at chapter end advances to next spine item (issue #10)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  // Switch to paginated mode and jump body scroll to the end so atEnd is true.
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'paginated' }; });
+  await page.waitForFunction(() => {
+    const t = document.getElementById('reader').querySelector('.chapter-progress').textContent;
+    return /^Page \d+ of \d+$/.test(t);
+  }, null, { timeout: 5_000 });
+  // Force last page of the chapter.
+  await page.evaluate(() => {
+    const body = document.getElementById('reader').querySelector('iframe').contentDocument.body;
+    const w = body.clientWidth;
+    body.scrollLeft = body.scrollWidth - w;
+  });
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'ArrowRight', bubbles: true }));
+  });
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  const spine = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  eq(spine, '2 / 3', 'arrow at end of chapter should advance to next spine item');
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'scroll' }; });
+});
+
+test('paginated mode: works with RTL chapters (issue #10)', async (h, { page }) => {
+  await h.openSample('regime-anticancer-arabic.epub');
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'paginated' }; });
+  await page.waitForFunction(() => {
+    const t = document.getElementById('reader').querySelector('.chapter-progress').textContent;
+    return /^Page \d+ of \d+$/.test(t);
+  }, null, { timeout: 5_000 });
+  const info = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return {
+      dir: doc.documentElement.getAttribute('dir') || doc.body?.getAttribute('dir') || '',
+      indicator: document.getElementById('reader').querySelector('.chapter-progress').textContent,
+    };
+  });
+  matches(info.indicator, /^Page 1 of \d+$/, `RTL paginated should show "Page 1 of N", got ${info.indicator}`);
+  await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'scroll' }; });
 });
 
 // ---------- runner ----------

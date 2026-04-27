@@ -52,25 +52,34 @@ import { openEpub } from './epub.js';
  * @property {HTMLInputElement}    sLineHeight
  * @property {HTMLInputElement}    sParagraphSpacing
  * @property {HTMLInputElement}    sJustify
+ * @property {HTMLInputElement}    sReadingWidth
  * @property {HTMLSpanElement}     sFontSizeV
  * @property {HTMLSpanElement}     sLineHeightV
  * @property {HTMLSpanElement}     sParagraphSpacingV
+ * @property {HTMLSpanElement}     sReadingWidthV
+ * @property {HTMLButtonElement}   sLayoutScroll
+ * @property {HTMLButtonElement}   sLayoutPaginated
  * @property {HTMLButtonElement}   sReset
  * @property {HTMLButtonElement}   sClose
  */
 
 /**
- * Typography overrides applied to chapter content. Sentinel values
- * mean "publisher default" (no rule emitted): empty string for
+ * Typography + layout overrides applied to chapter content. Sentinel
+ * values mean "publisher default" (no rule emitted): empty string for
  * `fontFamily`, 0 for `lineHeight`, -1 for `paragraphSpacing`,
- * `null` for `justify`.
+ * `null` for `justify`, 0 for `readingWidth`.
  *
  * @typedef {object} TypographySettings
- * @property {string}                fontFamily
- * @property {number}                fontSize           Percent, default 100.
- * @property {number}                lineHeight         0 = default.
- * @property {number}                paragraphSpacing   -1 = default; else em.
- * @property {boolean | null}        justify
+ * @property {string}                  fontFamily
+ * @property {number}                  fontSize           Percent, default 100.
+ * @property {number}                  lineHeight         0 = default.
+ * @property {number}                  paragraphSpacing   -1 = default; else em.
+ * @property {boolean | null}          justify
+ * @property {number}                  readingWidth       Max content width in
+ *                                                        ch; 0 = unlimited.
+ *                                                        Default 65.
+ * @property {'scroll' | 'paginated'}  layoutMode         Reflowable layout
+ *                                                        mode (default 'scroll').
  */
 
 const TYPOGRAPHY_KEY = 'epub-reader:typography';
@@ -83,6 +92,8 @@ function defaultTypography() {
     lineHeight: 0,
     paragraphSpacing: -1,
     justify: null,
+    readingWidth: 65,
+    layoutMode: 'scroll',
   };
 }
 
@@ -122,6 +133,12 @@ function buildTypographyCss(/** @type {TypographySettings} */ t) {
   }
   if (t.justify !== null) {
     rules.push(`body, p { text-align: ${t.justify ? 'justify' : 'start'} !important; }`);
+  }
+  if (t.readingWidth > 0) {
+    // Pin a max measure on the chapter body and centre it. Padding-inline
+    // ensures comfortable gutters even when the viewport equals the
+    // measure exactly.
+    rules.push(`body { max-inline-size: ${t.readingWidth}ch !important; margin-inline: auto !important; padding-inline: clamp(0.75rem, 3vw, 2rem) !important; }`);
   }
   return rules.join('\n');
 }
@@ -408,9 +425,20 @@ const TEMPLATE = `
         <span>Paragraph spacing</span><span class="value s-paragraph-spacing-v"></span>
         <input class="s-paragraph-spacing" type="range" min="-1" max="20" step="1" />
       </label>
+      <label>
+        <span>Reading width</span><span class="value s-reading-width-v"></span>
+        <input class="s-reading-width" type="range" min="0" max="120" step="5" />
+      </label>
       <div class="row checkbox">
         <label><input class="s-justify" type="checkbox" /><span>Justify text</span></label>
       </div>
+      <label>
+        <span>Layout</span>
+        <div class="seg" role="radiogroup" aria-label="Layout mode">
+          <button type="button" class="reader-seg-btn s-layout-scroll" data-mode="scroll" role="radio">Scroll</button>
+          <button type="button" class="reader-seg-btn s-layout-paginated" data-mode="paginated" role="radio">Paginated</button>
+        </div>
+      </label>
       <div class="row">
         <button type="button" class="s-reset">Reset</button>
         <button type="button" class="s-close primary">Done</button>
@@ -427,7 +455,7 @@ const TEMPLATE = `
 
 
 export class EpubReaderElement extends HTMLElement {
-  static get observedAttributes() { return ['src', 'start', 'hide-toc']; }
+  static get observedAttributes() { return ['src', 'start', 'hide-toc', 'allow-scripts']; }
 
   /** @type {ReaderElements} */     #els;
   /** @type {EpubBook | null} */    #book = null;
@@ -463,9 +491,13 @@ export class EpubReaderElement extends HTMLElement {
       sLineHeight:        $('.s-line-height'),
       sParagraphSpacing:  $('.s-paragraph-spacing'),
       sJustify:           $('.s-justify'),
+      sReadingWidth:      $('.s-reading-width'),
       sFontSizeV:         $('.s-font-size-v'),
       sLineHeightV:       $('.s-line-height-v'),
       sParagraphSpacingV: $('.s-paragraph-spacing-v'),
+      sReadingWidthV:     $('.s-reading-width-v'),
+      sLayoutScroll:      $('.s-layout-scroll'),
+      sLayoutPaginated:   $('.s-layout-paginated'),
       sReset:             $('.s-reset'),
       sClose:             $('.s-close'),
     };
@@ -479,6 +511,7 @@ export class EpubReaderElement extends HTMLElement {
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
     this.#wireSettingsControls();
     this.#syncSettingsControls();
+    this.#updateSandbox();
     this.tabIndex = 0;
   }
 
@@ -507,6 +540,27 @@ export class EpubReaderElement extends HTMLElement {
   attributeChangedCallback(name, oldValue, newValue) {
     if (oldValue === newValue) return;
     if (name === 'src' && this.isConnected && newValue) this.open(newValue);
+    if (name === 'allow-scripts') this.#updateSandbox();
+  }
+
+  /**
+   * Build the iframe `sandbox` attribute from the current host attributes.
+   *
+   * Default — `sandbox="allow-same-origin"` — blocks all scripts but lets
+   * us reach into the chapter document from the parent (fragment scroll,
+   * link interception, theme/typography injection). Setting `allow-scripts`
+   * on the host adds `allow-scripts` so interactive EPUBs (quizzes,
+   * bindings, scripted carousels) work.
+   *
+   * NB: `allow-same-origin` + `allow-scripts` together lets sandboxed
+   * scripts escape via the parent — only enable for content you trust.
+   */
+  #updateSandbox() {
+    const iframe = this.#els?.iframe;
+    if (!iframe) return;
+    const tokens = ['allow-same-origin'];
+    if (this.hasAttribute('allow-scripts')) tokens.push('allow-scripts');
+    iframe.setAttribute('sandbox', tokens.join(' '));
   }
 
   // ------- public API -------
@@ -689,12 +743,14 @@ export class EpubReaderElement extends HTMLElement {
     const doc = iframe.contentDocument;
     if (!doc) return;
 
-    // Apply chapter theming (VB tokens) + typography overrides before
+    // Apply chapter theming (VB tokens) + typography + layout before
     // paint to avoid a visible reflow.
     this.#applyChapterThemingTo(doc);
     this.#applyTypographyTo(doc);
     this.#applyLayoutTo(doc);
+    this.#applyPaginatedTo(doc);
     this.#wireChapterScroll(iframe);
+    this.#wirePagination(iframe);
 
     // Intercept in-book navigation via [data-epub-href] (set by epub.js).
     doc.addEventListener('click', (e) => {
@@ -779,10 +835,13 @@ export class EpubReaderElement extends HTMLElement {
   #onKeyDown(e) {
     if (!this.#book) return;
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    const paginated = this.#typography.layoutMode === 'paginated';
     if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
-      this.next(); e.preventDefault();
+      if (paginated) this.#pageNext(); else this.next();
+      e.preventDefault();
     } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
-      this.prev(); e.preventDefault();
+      if (paginated) this.#pagePrev(); else this.prev();
+      e.preventDefault();
     }
   }
 
@@ -808,7 +867,11 @@ export class EpubReaderElement extends HTMLElement {
     saveTypography(this.#typography);
     this.#syncSettingsControls();
     const doc = this.#els.iframe.contentDocument;
-    if (doc) this.#applyTypographyTo(doc);
+    if (doc) {
+      this.#applyTypographyTo(doc);
+      this.#applyPaginatedTo(doc);
+      this.#updateChapterProgress();
+    }
     this.dispatchEvent(new CustomEvent('epub-typography-change', {
       detail: { typography: { ...this.#typography } },
       bubbles: true, composed: true,
@@ -894,6 +957,166 @@ export class EpubReaderElement extends HTMLElement {
   }
 
   /**
+   * Inject (or remove) the paginated-columns stylesheet. Active only
+   * when `typography.layoutMode === 'paginated'` AND the chapter is
+   * reflowable (pre-paginated chapters are already image-page-fitted).
+   * @param {Document} doc
+   */
+  #applyPaginatedTo(doc) {
+    if (doc.documentElement?.localName === 'svg') return;
+    const head = doc.head || doc.documentElement;
+    if (!head) return;
+    const id = '__epub_reader_paginated';
+    let style = /** @type {HTMLStyleElement | null} */ (doc.getElementById(id));
+    const item = this.#book?.spine[this.#currentIndex];
+    const reflowable = !item || item.layout !== 'pre-paginated';
+    const wantPaginated = this.#typography.layoutMode === 'paginated' && reflowable;
+    if (!wantPaginated) { style?.remove(); return; }
+    if (!style) { style = doc.createElement('style'); style.id = id; head.append(style); }
+    style.textContent = [
+      // Lock the document to the viewport, lay children out as columns
+      // exactly the viewport's width, and let body horizontally scroll
+      // through them. scroll-snap keeps page-turns crisp.
+      `html { height: 100vh !important; overflow: hidden !important; margin: 0 !important; }`,
+      `body { margin: 0 !important; height: 100vh !important;`
+        + ` column-width: 100vw !important; column-gap: 0 !important; column-fill: auto !important;`
+        + ` overflow-x: auto !important; overflow-y: hidden !important;`
+        + ` scroll-snap-type: x mandatory !important; scrollbar-width: none !important;`
+        + ` overscroll-behavior-x: contain !important; }`,
+      `body::-webkit-scrollbar { display: none !important; }`,
+      // Most chapter children are paragraphs and headings; snapping at
+      // the body level is enough, but anchors at column starts help RTL.
+      `body > * { scroll-snap-align: start; }`,
+      // Tame oversized media so it never overflows a column.
+      `body img, body svg, body video, body iframe { max-inline-size: 100% !important; max-block-size: 100% !important; block-size: auto !important; }`,
+      // Avoid splitting figures/blockquotes across page boundaries
+      // when possible — readability win.
+      `figure, blockquote, pre, table { break-inside: avoid; }`,
+    ].join('\n');
+  }
+
+  /**
+   * Compute current/total pages of the visible chapter (paginated mode).
+   * Returns null if not in paginated mode or the iframe doc isn't ready.
+   * @returns {{current: number, total: number, atStart: boolean, atEnd: boolean} | null}
+   */
+  #pageInfo() {
+    if (this.#typography.layoutMode !== 'paginated') return null;
+    const doc = this.#els.iframe.contentDocument;
+    if (!doc?.body) return null;
+    const item = this.#book?.spine[this.#currentIndex];
+    if (item?.layout === 'pre-paginated') return null;
+    const body = doc.body;
+    const pageW = body.clientWidth;
+    if (pageW <= 0) return null;
+    const total = Math.max(1, Math.round(body.scrollWidth / pageW));
+    const cur = Math.round(Math.abs(body.scrollLeft) / pageW);
+    return {
+      current: cur + 1,
+      total,
+      atStart: cur <= 0,
+      atEnd:   cur >= total - 1,
+    };
+  }
+
+  /** Advance one page within the current chapter; spill over to next chapter at end. */
+  async #pageNext() {
+    const info = this.#pageInfo();
+    if (!info) { return this.next(); }
+    if (info.atEnd) {
+      this.#enterFromBack = false;
+      return this.next();
+    }
+    const body = this.#els.iframe.contentDocument?.body;
+    if (!body) return;
+    body.scrollBy({ left: body.clientWidth, behavior: 'instant' });
+    this.#updateChapterProgress();
+  }
+
+  /** Step back one page within the current chapter; spill over to prev chapter at start. */
+  async #pagePrev() {
+    const info = this.#pageInfo();
+    if (!info) { return this.prev(); }
+    if (info.atStart) {
+      this.#enterFromBack = true;
+      return this.prev();
+    }
+    const body = this.#els.iframe.contentDocument?.body;
+    if (!body) return;
+    body.scrollBy({ left: -body.clientWidth, behavior: 'instant' });
+    this.#updateChapterProgress();
+  }
+
+  /**
+   * Wire pagination affordances: scroll-to-end on backward chapter
+   * spillover, edge clicks (prev/next page), touch-swipe page-turn.
+   * @param {HTMLIFrameElement} iframe
+   */
+  #wirePagination(iframe) {
+    const doc = iframe.contentDocument;
+    const body = doc?.body;
+    if (!doc || !body) return;
+    const paginated = this.#typography.layoutMode === 'paginated' &&
+                      this.#book?.spine[this.#currentIndex]?.layout !== 'pre-paginated';
+    if (!paginated) return;
+
+    // If we entered the chapter via backward chapter navigation, jump
+    // to the last page so the reader stays "going backwards".
+    if (this.#enterFromBack) {
+      const after = () => {
+        const pageW = body.clientWidth;
+        const last = Math.max(0, Math.floor(body.scrollWidth / pageW) - 0) - 1;
+        body.scrollLeft = Math.max(0, last) * pageW;
+        this.#updateChapterProgress();
+      };
+      // Wait one frame for layout, then a second time after window load
+      // (subresources affecting column flow).
+      requestAnimationFrame(after);
+      iframe.contentWindow?.addEventListener('load', after, { once: true });
+      this.#enterFromBack = false;
+    }
+
+    // Edge-click + touch-swipe support.
+    let downX = 0, downY = 0, downT = 0;
+    doc.addEventListener('pointerdown', (ev) => {
+      downX = ev.clientX; downY = ev.clientY; downT = Date.now();
+    });
+    doc.addEventListener('pointerup', (ev) => {
+      const dx = ev.clientX - downX, dy = ev.clientY - downY;
+      const dt = Date.now() - downT;
+      const insideAnchor = /** @type {Element | null} */ (ev.target)?.closest?.('a, button, [data-epub-href]');
+      if (insideAnchor) return;
+      // Swipe: fast horizontal drag.
+      if (dt < 600 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        if (dx < 0) this.#pageNext(); else this.#pagePrev();
+        return;
+      }
+      // Edge click (no real movement): hit a page-turn zone.
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) {
+        const w = body.clientWidth;
+        if (ev.clientX < Math.min(120, w * 0.15)) this.#pagePrev();
+        else if (ev.clientX > w - Math.min(120, w * 0.15)) this.#pageNext();
+      }
+    });
+  }
+
+  /** Recompute and write the chapter-progress display. */
+  #updateChapterProgress() {
+    const display = this.#els.chapterProgress;
+    const info = this.#pageInfo();
+    if (info) {
+      display.hidden = false;
+      display.textContent = `Page ${info.current} of ${info.total}`;
+      return;
+    }
+    // Scroll mode: percentage already wired by #wireChapterScroll on
+    // each scroll event; nothing to do here.
+  }
+
+  /** True when the next chapter load should land at the end (back-paging spillover). */
+  #enterFromBack = false;
+
+  /**
    * Track scroll position inside the chapter iframe and update the
    * `.chapter-progress` span. Reflowable chapters get a percentage,
    * fixed-layout (image-page) chapters get nothing — there's no scroll.
@@ -911,16 +1134,24 @@ export class EpubReaderElement extends HTMLElement {
       display.textContent = '';
       return;
     }
+    const paginated = this.#typography.layoutMode === 'paginated';
     display.hidden = false;
     const update = () => {
+      if (this.#typography.layoutMode === 'paginated') {
+        this.#updateChapterProgress();
+        return;
+      }
       const se = doc.scrollingElement || doc.documentElement;
       const max = se.scrollHeight - se.clientHeight;
       const pct = max > 0 ? Math.round((se.scrollTop / max) * 100) : 100;
       display.textContent = `${pct}%`;
     };
     update();
+    // Vertical scroll (scroll mode) and horizontal scroll (paginated)
+    // both fire the same event on the window.
     win.addEventListener('scroll', update, { passive: true });
-    // After subresources load, the height shifts; recompute once.
+    doc.body?.addEventListener('scroll', update, { passive: true });
+    // After subresources load, layout shifts; recompute once.
     win.addEventListener('load', update, { once: true });
   }
 
@@ -946,6 +1177,9 @@ export class EpubReaderElement extends HTMLElement {
       update({ paragraphSpacing: v < 0 ? -1 : v });
     });
     e.sJustify.addEventListener('change', () => update({ justify: e.sJustify.checked }));
+    e.sReadingWidth.addEventListener('input', () => update({ readingWidth: Number(e.sReadingWidth.value) }));
+    e.sLayoutScroll.addEventListener('click', () => update({ layoutMode: 'scroll' }));
+    e.sLayoutPaginated.addEventListener('click', () => update({ layoutMode: 'paginated' }));
     e.sReset.addEventListener('click', () => this.resetTypography());
     e.sClose.addEventListener('click', () => this.#toggleSettings(false));
 
@@ -974,6 +1208,13 @@ export class EpubReaderElement extends HTMLElement {
       : `${(t.paragraphSpacing / 10).toFixed(1)}em`;
     e.sJustify.checked = !!t.justify;
     e.sJustify.indeterminate = t.justify === null;
+    e.sReadingWidth.value = String(t.readingWidth);
+    e.sReadingWidthV.textContent = t.readingWidth === 0 ? 'unlimited' : `${t.readingWidth} ch`;
+    const paginated = t.layoutMode === 'paginated';
+    e.sLayoutScroll.dataset.readerState = paginated ? '' : 'active';
+    e.sLayoutPaginated.dataset.readerState = paginated ? 'active' : '';
+    e.sLayoutScroll.setAttribute('aria-checked', String(!paginated));
+    e.sLayoutPaginated.setAttribute('aria-checked', String(paginated));
   }
 
   #setOverlay(message, isError = false) {
