@@ -453,6 +453,119 @@ test('TOC: clicking a deep-fragment entry scrolls past the chapter top (issue #3
   truthy(Math.abs(stats.targetTop) < 200, `target should be near viewport top, got top=${stats.targetTop}`);
 });
 
+test('chapter progress: scrolling the iframe updates the % display (issue #4)', async (h, { page }) => {
+  // childrens-literature.epub is one 343 KB chapter — its scroll height
+  // far exceeds the viewport, so a scroll has somewhere to go.
+  await h.openSample('childrens-literature.epub');
+  // Walk to the body chapter (first item is the cover image).
+  await page.evaluate(() => document.getElementById('reader').goToIndex(2));
+  await h.waitChapter((doc) => doc.body && doc.body.textContent && doc.body.textContent.length > 1000);
+
+  const initial = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return r.querySelector('.chapter-progress').textContent;
+  });
+  matches(initial, /^\d+%$/, `chapter-progress should show a percentage at start, got ${JSON.stringify(initial)}`);
+
+  // Programmatic scroll inside the iframe.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const se = doc.scrollingElement || doc.documentElement;
+    se.scrollTop = Math.floor((se.scrollHeight - se.clientHeight) * 0.6);
+    iframe.contentWindow.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForFunction(() => {
+    const txt = document.getElementById('reader').querySelector('.chapter-progress').textContent;
+    return /^\d+%$/.test(txt) && parseInt(txt, 10) >= 50;
+  }, null, { timeout: 5_000 });
+  const scrolled = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.chapter-progress').textContent);
+  const pct = parseInt(scrolled, 10);
+  truthy(pct >= 50 && pct <= 100, `expected 50-100% after scrolling 60% in, got ${scrolled}`);
+});
+
+test('chapter progress: spine progress (X / Y) is unchanged by scrolling', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  const before = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    const se = doc.scrollingElement || doc.documentElement;
+    if (se) se.scrollTop = 200;
+  });
+  // Allow the scroll listener to update the chapter-progress.
+  await page.waitForFunction(() => true, null, { timeout: 50 });
+  const after = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  eq(after, before, 'spine progress should not change on scroll');
+});
+
+test('rendition:layout: pre-paginated declared at book level (issue #5)', async (h, { page }) => {
+  await h.openSample('haruko-html-jpeg.epub');
+  const layouts = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    // SpineItem.layout is exposed via the `spine` getter on the underlying book.
+    // We can't reach the EpubBook directly, but the runtime applies a layout
+    // style to the iframe — use that as the observable.
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      layoutStyle: !!doc.getElementById('__epub_reader_layout'),
+      bodyDisplay: doc.body ? doc.defaultView.getComputedStyle(doc.body).display : '',
+      bodyOverflow: doc.documentElement
+        ? doc.defaultView.getComputedStyle(doc.documentElement).overflow
+        : '',
+    };
+  });
+  truthy(layouts.layoutStyle, 'pre-paginated chapter should get a __epub_reader_layout style');
+  eq(layouts.bodyDisplay, 'flex', 'body should be display:flex (centred image)');
+  matches(layouts.bodyOverflow, /hidden/, 'html overflow should be hidden in fixed layout');
+});
+
+test('rendition:layout: chapter image fits the viewport (issue #5)', async (h, { page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await h.openSample('haruko-html-jpeg.epub');
+  const fit = await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const img = doc.querySelector('img');
+    if (!img) return null;
+    const cs = doc.defaultView.getComputedStyle(img);
+    const rect = img.getBoundingClientRect();
+    return {
+      naturalW: img.naturalWidth,
+      naturalH: img.naturalHeight,
+      width:  Math.round(rect.width),
+      height: Math.round(rect.height),
+      objectFit: cs.objectFit,
+      iframeW: iframe.clientWidth,
+      iframeH: iframe.clientHeight,
+    };
+  });
+  truthy(fit, 'chapter should contain at least one image');
+  truthy(fit.naturalW > 0, 'image should be loaded');
+  truthy(fit.width <= fit.iframeW + 1, `image width ${fit.width} should fit in iframe width ${fit.iframeW}`);
+  truthy(fit.height <= fit.iframeH + 1, `image height ${fit.height} should fit in iframe height ${fit.iframeH}`);
+});
+
+test('rendition:layout: chapter-progress hidden in fixed-layout chapters', async (h, { page }) => {
+  await h.openSample('haruko-html-jpeg.epub');
+  const hidden = await page.evaluate(() => {
+    const cp = document.getElementById('reader').querySelector('.chapter-progress');
+    return cp.hidden;
+  });
+  eq(hidden, true, 'chapter-progress should be hidden for pre-paginated chapters');
+});
+
+test('rendition:layout: reflowable chapters do NOT get the layout style', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  const present = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return !!doc.getElementById('__epub_reader_layout');
+  });
+  eq(present, false, 'reflowable chapter should not have a layout style injected');
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;
