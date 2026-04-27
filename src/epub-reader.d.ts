@@ -90,12 +90,24 @@ export interface EpubTypographyChangeDetail {
   typography: TypographySettings;
 }
 
+/**
+ * Detail payload for the `epub-position-restored` event. Fired after
+ * `open()` if the reader successfully restored a previously-saved
+ * spine index + scroll fraction for this book.
+ */
+export interface EpubPositionRestoredDetail {
+  spineIndex: number;
+  scrollFraction: number;
+  bookId: string | null;
+}
+
 /** Map of events emitted by <epub-reader> to their CustomEvent detail types. */
 export interface EpubReaderEventMap {
   'epub-loaded':              CustomEvent<EpubLoadedDetail>;
   'epub-navigate':            CustomEvent<EpubNavigateDetail>;
   'epub-error':               CustomEvent<EpubErrorDetail>;
   'epub-typography-change':   CustomEvent<EpubTypographyChangeDetail>;
+  'epub-position-restored':   CustomEvent<EpubPositionRestoredDetail>;
 }
 
 /** Programmatic source accepted by `open()`. */
@@ -198,6 +210,13 @@ export class EpubBook {
 
   /** Map a manifest path back to a spine index. -1 if not in spine. */
   spineIndexOf(path: string): number;
+
+  /**
+   * Stable per-book identifier suitable as a persistence key. Prefers
+   * `dc:identifier` (prefixed `id:`) and falls back to SHA-256 of the
+   * source blob (prefixed `sha:`).
+   */
+  bookId(): Promise<string>;
 
   /** Revoke all generated blob URLs. */
   destroy(): void;

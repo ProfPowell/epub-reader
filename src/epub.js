@@ -82,7 +82,7 @@ export async function openEpub(source) {
     throw new TypeError('openEpub expects a URL string, Blob/File, or ArrayBuffer');
   }
   const zip = await ZipArchive.from(blob);
-  const book = new EpubBook(zip);
+  const book = new EpubBook(zip, blob);
   await book.load();
   return book;
 }
@@ -99,9 +99,38 @@ export class EpubBook {
   /** @type {string | null} */                       #navId    = null;
   /** @type {Map<string, string>} */                 #blobUrls = new Map();
   /** @type {Map<string, Promise<string>>} */        #pending  = new Map();
+  /** @type {Blob | null} */                         #source = null;
+  /** @type {string | null} */                       #cachedBookId = null;
 
-  constructor(zip) {
+  /**
+   * @param {ZipArchive} zip
+   * @param {Blob | null} [source]  Original EPUB blob — kept for SHA-256
+   *                                fallback when dc:identifier is empty.
+   */
+  constructor(zip, source = null) {
     this.#zip = zip;
+    this.#source = source;
+  }
+
+  /**
+   * Stable per-book identifier for persistence keys. Prefers
+   * `dc:identifier` from the OPF; falls back to the SHA-256 of the
+   * source blob (cached after the first call). Throws only if neither
+   * is available.
+   *
+   * @returns {Promise<string>}
+   */
+  async bookId() {
+    if (this.#cachedBookId) return this.#cachedBookId;
+    const id = (this.#metadata.identifier || '').trim();
+    if (id) return (this.#cachedBookId = `id:${id}`);
+    if (!this.#source) throw new Error('bookId: no dc:identifier and no source blob to hash');
+    const buf = await this.#source.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', buf);
+    const hex = Array.from(new Uint8Array(digest))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+    return (this.#cachedBookId = `sha:${hex}`);
   }
 
   async load() {
