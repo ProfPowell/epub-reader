@@ -827,7 +827,7 @@ test('position: book identifier prefers dc:identifier over SHA-256 (issue #12)',
   // a fresh load (no stored position → no event), so instead we verify
   // by triggering save and inspecting IndexedDB directly.
   await h.openSample('moby-dick.epub');
-  await page.evaluate(() => document.getElementById('reader').goToIndex(2));
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
   await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
   await new Promise(r => setTimeout(r, 700));
   const ids = await page.evaluate(async () => {
@@ -1147,6 +1147,107 @@ test('library: getStorageEstimate reports usage/quota (issue #14)', async (h, { 
   truthy(typeof est.usage === 'number' && est.usage >= 0, 'usage should be a number');
   truthy(typeof est.quota === 'number' && est.quota > 0, 'quota should be > 0');
   truthy(est.percent >= 0 && est.percent <= 100, `percent should be 0..100, got ${est.percent}`);
+});
+
+test('find: Ctrl+F opens the find bar (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Dispatch Ctrl+F on the host.
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'f', ctrlKey: true, bubbles: true }));
+  });
+  const open = await page.evaluate(() =>
+    !document.getElementById('reader').querySelector('.find-bar').hidden);
+  eq(open, true, 'Ctrl+F should open the find bar');
+});
+
+test('find: typing highlights matches and shows count (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => document.getElementById('reader').find(true));
+
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.value = 'the';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const c = document.getElementById('reader').querySelector('.find-count').textContent;
+    return /^\d+ \/ \d+$/.test(c) && Number(c.split('/')[1].trim()) > 0;
+  }, null, { timeout: 5_000 });
+  const stats = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      count: r.querySelector('.find-count').textContent,
+      marks: doc.querySelectorAll('[data-reader-mark="find"]').length,
+      currentMarks: doc.querySelectorAll('[data-reader-mark="find"].current').length,
+    };
+  });
+  matches(stats.count, /^1 \/ [1-9]\d*$/, `expected "1 / N", got ${stats.count}`);
+  truthy(stats.marks > 0, 'expected at least one find mark in the chapter');
+  truthy(stats.currentMarks >= 1, 'expected exactly the first match to be .current');
+  await page.evaluate(() => document.getElementById('reader').find(false));
+});
+
+test('find: Enter cycles forward, Shift+Enter cycles backward (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => document.getElementById('reader').find(true));
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.value = 'the';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const c = document.getElementById('reader').querySelector('.find-count').textContent;
+    return /^1 \/ \d+$/.test(c);
+  });
+  // Step forward twice, back once → at "2 / N".
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+  });
+  const count = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.find-count').textContent);
+  matches(count, /^2 \/ /, `expected "2 / N" after +/+/-, got ${count}`);
+  await page.evaluate(() => document.getElementById('reader').find(false));
+});
+
+test('find: Escape closes and clears marks (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => document.getElementById('reader').find(true));
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.value = 'the';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="find"]').length > 0;
+  });
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'Escape', bubbles: true }));
+  });
+  const after = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      barHidden: r.querySelector('.find-bar').hidden,
+      marks: doc.querySelectorAll('[data-reader-mark="find"]').length,
+    };
+  });
+  eq(after.barHidden, true, 'Esc should close the find bar');
+  eq(after.marks, 0, 'Esc should clear find marks');
 });
 
 // ---------- runner ----------

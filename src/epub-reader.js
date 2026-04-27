@@ -28,6 +28,7 @@
 
 import { openEpub } from './epub.js';
 import { dbGet, dbPut, dbDelete, dbGetAll, dbClear } from './storage.js';
+import { findOffsets, plainText, rangeFromOffsets, wrapRange, unwrapAll, offsetsFromRange } from './range-utils.js';
 /** @typedef {import('./epub.js').EpubBook} EpubBook */
 /** @typedef {import('./epub.js').TocEntry} TocEntry */
 
@@ -115,6 +116,12 @@ import { dbGet, dbPut, dbDelete, dbGetAll, dbClear } from './storage.js';
  * @property {HTMLElement}         libQuota
  * @property {HTMLButtonElement}   libClear
  * @property {HTMLButtonElement}   libClose
+ * @property {HTMLElement}         findBar
+ * @property {HTMLInputElement}    findInput
+ * @property {HTMLSpanElement}     findCount
+ * @property {HTMLButtonElement}   findPrev
+ * @property {HTMLButtonElement}   findNext
+ * @property {HTMLButtonElement}   findClose
  */
 
 /**
@@ -233,6 +240,34 @@ function buildTypographyCss(/** @type {TypographySettings} */ t) {
 // All colours / sizes / radii read Vanilla Breeze tokens with sensible
 // fallbacks, so the component is themable when VB is loaded and usable
 // (if plainer) when it isn't.
+// Stylesheet injected into every chapter iframe. Styles the wrappers
+// emitted by range-utils for find (#17), search (#16), and highlights
+// (#15). Kept minimal — one rule per kind, distinct visuals, no
+// publisher-CSS conflicts.
+const MARKS_CSS = `
+[data-reader-mark="find"] {
+  background: #fde68a !important;
+  color: inherit !important;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+[data-reader-mark="find"].current {
+  background: #f59e0b !important;
+  outline: 2px solid #f59e0b;
+}
+[data-reader-mark="search"] {
+  background: color-mix(in srgb, #2d6cdf 25%, transparent) !important;
+  color: inherit !important;
+  border-radius: 2px;
+}
+[data-reader-mark="highlight"] {
+  background: var(--reader-hl-color, #fde68a) !important;
+  color: inherit !important;
+  border-radius: 2px;
+  cursor: pointer;
+}
+`;
+
 const COMPONENT_CSS = `
 @scope (epub-reader) {
   :scope {
@@ -492,6 +527,38 @@ const COMPONENT_CSS = `
   /* Solid star when bookmark exists at current position. */
   :scope([data-bookmark-active]) .bookmarks-toggle::before { content: ''; }
 
+  /* Find-in-chapter bar (Ctrl/Cmd+F replacement). */
+  .find-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--size-3xs, 0.25rem);
+    padding: 0.4rem 0.75rem;
+    border-block-end: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    background: var(--color-surface, #f5f5f5);
+    position: relative; z-index: 3;
+  }
+  .find-bar[hidden] { display: none; }
+  .find-bar .find-input {
+    flex: 1;
+    font: inherit; color: inherit; background: var(--color-background, #fff);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+    padding: 0.3rem 0.5rem;
+    min-inline-size: 0;
+  }
+  .find-bar .find-count {
+    color: var(--color-text-muted, #667085);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--font-size-2xs, 0.75rem);
+    min-inline-size: 4rem;
+    text-align: end;
+  }
+
+  /* CSS for find/highlight marks lives in a stylesheet injected into
+     the chapter iframe — kept inline below in #findStyles for easy
+     re-application after publisher CSS rewrites. The :scope rules
+     here only affect host chrome. */
+
   /* Library panel: full-width overlay so cards have room to breathe. */
   .library-panel {
     position: absolute;
@@ -699,6 +766,14 @@ const TEMPLATE = `
     </div>
   </div>
 </header>
+<div class="find-bar" role="search" aria-label="Find in chapter" hidden>
+  <input class="find-input" type="search" placeholder="Find in chapter…"
+    aria-label="Find in chapter" autocomplete="off" spellcheck="false" />
+  <span class="find-count" aria-live="polite"></span>
+  <button class="reader-icon-btn find-prev" type="button" aria-label="Previous match">&uarr;</button>
+  <button class="reader-icon-btn find-next" type="button" aria-label="Next match">&darr;</button>
+  <button class="reader-icon-btn find-close" type="button" aria-label="Close find">&times;</button>
+</div>
 <div class="body">
   <aside class="sidebar"><h2>Contents</h2><ol class="toc"></ol></aside>
   <div class="content">
@@ -843,6 +918,12 @@ export class EpubReaderElement extends HTMLElement {
       libQuota:           $('.lib-quota'),
       libClear:           $('.lib-clear'),
       libClose:           $('.lib-close'),
+      findBar:            $('.find-bar'),
+      findInput:          $('.find-input'),
+      findCount:          $('.find-count'),
+      findPrev:           $('.find-prev'),
+      findNext:           $('.find-next'),
+      findClose:          $('.find-close'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
@@ -861,6 +942,19 @@ export class EpubReaderElement extends HTMLElement {
       await this.clearLibrary();
       await this.#renderLibrary();
     });
+    // Find-in-chapter controls.
+    this.#els.findInput.addEventListener('input', () => this.#refreshFind());
+    this.#els.findInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        if (e.shiftKey) this.#findStep(-1); else this.#findStep(+1);
+        e.preventDefault();
+      } else if (e.key === 'Escape') {
+        this.find(false); e.preventDefault();
+      }
+    });
+    this.#els.findPrev.addEventListener('click', () => this.#findStep(-1));
+    this.#els.findNext.addEventListener('click', () => this.#findStep(+1));
+    this.#els.findClose.addEventListener('click', () => this.find(false));
     this.#els.iframe.addEventListener('load', () => this.#onIframeLoad());
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
     this.#wireSettingsControls();
@@ -1053,6 +1147,111 @@ export class EpubReaderElement extends HTMLElement {
       updatedAt: Date.now(),
     };
     await dbPut('positions', record);
+  }
+
+  // ------- find in chapter (#17) -------
+
+  /** Current query string in the find bar. */
+  #findQuery = '';
+  /** Index of the focused match within the current chapter. */
+  #findIndex = 0;
+  /** Cached count of matches in the current chapter. */
+  #findTotal = 0;
+
+  /**
+   * Open or close the find-in-chapter bar. When opening, focuses the
+   * input and seeds it with the current selection (if any).
+   *
+   * @param {boolean} open
+   */
+  find(open) {
+    const bar = this.#els.findBar;
+    if (open) {
+      bar.hidden = false;
+      const sel = this.#els.iframe.contentDocument?.getSelection?.()?.toString();
+      if (sel) {
+        this.#els.findInput.value = sel;
+      }
+      this.#els.findInput.focus();
+      this.#els.findInput.select();
+      this.#refreshFind();
+    } else {
+      bar.hidden = true;
+      this.#findQuery = '';
+      this.#findIndex = 0;
+      this.#findTotal = 0;
+      this.#els.findInput.value = '';
+      this.#els.findCount.textContent = '';
+      const doc = this.#els.iframe.contentDocument;
+      if (doc) this.#findClearMarks(doc);
+    }
+  }
+
+  #refreshFind() {
+    const doc = this.#els.iframe.contentDocument;
+    if (!doc?.body) return;
+    this.#findClearMarks(doc);
+    const q = this.#els.findInput.value;
+    this.#findQuery = q;
+    if (!q || q.length < 2) {
+      this.#findTotal = 0;
+      this.#findIndex = 0;
+      this.#els.findCount.textContent = '';
+      return;
+    }
+    const offsets = findOffsets(doc.body, q);
+    this.#findTotal = offsets.length;
+    this.#findIndex = offsets.length > 0 ? 0 : -1;
+    if (offsets.length === 0) {
+      this.#els.findCount.textContent = '0 / 0';
+      return;
+    }
+    // Wrap each match in document order. We re-resolve the range
+    // for each one because previous wraps split the text nodes.
+    let i = 0;
+    for (const { start, end } of offsets) {
+      const range = rangeFromOffsets(doc.body, start, end);
+      if (!range) continue;
+      const idx = i++;
+      wrapRange(range, () => {
+        const m = doc.createElement('mark');
+        m.setAttribute('data-reader-mark', 'find');
+        m.dataset.findIndex = String(idx);
+        return m;
+      });
+    }
+    this.#findFocusCurrent();
+  }
+
+  /** @param {Document} doc */
+  #findClearMarks(doc) {
+    if (!doc.body) return;
+    unwrapAll(doc.body, '[data-reader-mark="find"]');
+  }
+
+  /** @param {1 | -1} dir */
+  #findStep(dir) {
+    if (this.#findTotal === 0) return;
+    this.#findIndex = (this.#findIndex + dir + this.#findTotal) % this.#findTotal;
+    this.#findFocusCurrent();
+  }
+
+  #findFocusCurrent() {
+    const doc = this.#els.iframe.contentDocument;
+    if (!doc) return;
+    // De-emphasise others, mark current.
+    for (const el of /** @type {NodeListOf<HTMLElement>} */
+        (doc.querySelectorAll('[data-reader-mark="find"].current'))) {
+      el.classList.remove('current');
+    }
+    const wraps = /** @type {NodeListOf<HTMLElement>} */ (
+      doc.querySelectorAll(`[data-reader-mark="find"][data-find-index="${this.#findIndex}"]`));
+    let scrolled = false;
+    for (const el of wraps) {
+      el.classList.add('current');
+      if (!scrolled) { el.scrollIntoView({ block: 'center' }); scrolled = true; }
+    }
+    this.#els.findCount.textContent = `${this.#findIndex + 1} / ${this.#findTotal}`;
   }
 
   // ------- bookmarks -------
@@ -1469,6 +1668,7 @@ export class EpubReaderElement extends HTMLElement {
     this.#bookmarks = [];
     this.#renderBookmarks();
     this.#updateBookmarkButton();
+    this.find(false);
     this.#els.iframe.removeAttribute('src');
     this.#els.toc.innerHTML = '';
     this.#els.title.textContent = '';
@@ -1626,6 +1826,24 @@ export class EpubReaderElement extends HTMLElement {
       if (href) this.goToPath(href);
     });
 
+    // Forward Ctrl/Cmd+F and Escape from the iframe to our find bar.
+    doc.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        this.find(true);
+      } else if (e.key === 'Escape' && !this.#els.findBar.hidden) {
+        e.preventDefault();
+        this.find(false);
+      }
+    });
+
+    // Re-apply find marks for the current query (chapter changed under us).
+    if (!this.#els.findBar.hidden && this.#findQuery) {
+      this.#refreshFind();
+    } else {
+      this.#findClearMarks(doc);
+    }
+
     // Scroll to the requested fragment, if any.
     const frag = iframe.dataset.fragment;
     if (frag) {
@@ -1694,11 +1912,30 @@ export class EpubReaderElement extends HTMLElement {
       head.append(style);
     }
     style.textContent = buildTypographyCss(this.#typography);
+
+    // Marks stylesheet — find / search / highlight wrappers all use
+    // [data-reader-mark="..."]. Idempotent: only inject once per doc.
+    if (!doc.getElementById('__epub_reader_marks')) {
+      const m = doc.createElement('style');
+      m.id = '__epub_reader_marks';
+      m.textContent = MARKS_CSS;
+      head.append(m);
+    }
   }
 
   #onKeyDown(e) {
     if (!this.#book) return;
+    // Ctrl/Cmd+F intercepts the browser's native find — handled even
+    // when modifiers are present.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+      this.find(true);
+      e.preventDefault();
+      return;
+    }
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Escape' && !this.#els.findBar.hidden) {
+      this.find(false); e.preventDefault(); return;
+    }
     const paginated = this.#typography.layoutMode === 'paginated';
     if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
       if (paginated) this.#pageNext(); else this.next();
