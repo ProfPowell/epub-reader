@@ -96,8 +96,11 @@ export interface EpubReaderEventMap {
 export type EpubSource = string | Blob | ArrayBuffer | ArrayBufferView;
 
 /**
- * The `<epub-reader>` custom element. A drop-in EPUB 3 viewer with a
- * shadow-DOM UI (toolbar, TOC sidebar, content iframe).
+ * The `<epub-reader>` custom element. A drop-in EPUB 3 viewer rendered
+ * in light DOM, using Vanilla Breeze chrome conventions
+ * (`.reader-chrome`, `.reader-controls`, `.reader-icon-btn`) and
+ * tokens (`--color-background`, `--color-text`, `--color-interactive`,
+ * `--color-border`). Chapter content lives in a sandboxed iframe.
  *
  * Attributes:
  * - `src`       URL of an EPUB to auto-load.
@@ -135,6 +138,11 @@ export class EpubReaderElement extends HTMLElement {
 
   /** Reset typography overrides to publisher defaults. */
   resetTypography(): void;
+
+  // Theming is delegated to the host page's Vanilla Breeze theme
+  // engine. The reader reads `--color-background`, `--color-text`,
+  // `--color-interactive`, and `--color-border` off the host element
+  // and applies them to chapter content automatically.
 
   // Typed event helpers — work just like HTMLElement's, but resolve event
   // names against EpubReaderEventMap so CustomEvent.detail is typed.

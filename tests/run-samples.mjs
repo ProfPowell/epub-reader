@@ -121,15 +121,15 @@ async function runOne(file) {
     // Wait for either a successful load or an error overlay.
     await page.waitForFunction(() => {
       const r = document.getElementById('reader');
-      const t = r?.shadowRoot?.querySelector('.title')?.textContent;
-      const ov = r?.shadowRoot?.querySelector('.overlay');
+      const t = r?.querySelector('.title')?.textContent;
+      const ov = r?.querySelector('.overlay');
       const errMode = ov && !ov.hidden && ov.classList.contains('error');
       return errMode || (t && t.length > 0);
     }, null, { timeout: 15_000 });
 
     const state = await page.evaluate(() => {
       const r = document.getElementById('reader');
-      const s = r.shadowRoot;
+      const s = r;
       const ov = s.querySelector('.overlay');
       const isError = ov && !ov.hidden && ov.classList.contains('error');
       return {
@@ -149,7 +149,7 @@ async function runOne(file) {
     // Wait for the first chapter to render in the iframe. Allow either an
     // HTML body with content or an SVG root (svg-in-spine EPUBs).
     await page.waitForFunction(() => {
-      const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+      const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
       if (!doc) return false;
       if (doc.body && doc.body.children.length > 0) return true;
       const root = doc.documentElement;
