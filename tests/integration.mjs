@@ -1024,6 +1024,131 @@ test('bookmarks: persist across reload (issue #13)', async (h, { page }) => {
   });
 });
 
+test('library: opening a book auto-adds it (issue #14)', async (h, { page }) => {
+  // Wipe via the public API so we don't fight the page-context restriction.
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+
+  await h.openSample('moby-dick.epub');
+  // The persist runs fire-and-forget — wait for the entry to land.
+  await page.waitForFunction(async () => {
+    const lib = await document.getElementById('reader').getLibrary();
+    return lib.length > 0 && lib[0].title === 'Moby-Dick';
+  }, null, { timeout: 5_000 });
+  const lib = await page.evaluate(() => document.getElementById('reader').getLibrary());
+  eq(lib.length, 1, 'expected one library entry after opening one book');
+  eq(lib[0].title, 'Moby-Dick');
+  truthy(lib[0].size > 0, 'library entry should record blob.size');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: panel renders cards for stored books (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+
+  // Open three different books so the library has something to show.
+  await h.openSample('trees.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 1, null, { timeout: 5_000 });
+  await h.openSample('wasteland.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 2, null, { timeout: 5_000 });
+  await h.openSample('moby-dick.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 3, null, { timeout: 5_000 });
+
+  // Open the panel and verify cards are rendered.
+  await page.click('.library-toggle');
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return !r.querySelector('.library-panel').hidden &&
+           r.querySelectorAll('.lib-list li').length === 3;
+  }, null, { timeout: 5_000 });
+  const titles = await page.evaluate(() =>
+    [...document.getElementById('reader').querySelectorAll('.lib-list .lib-title')]
+      .map(t => t.textContent.trim()));
+  truthy(titles.includes('Moby-Dick'), `expected Moby-Dick card, got ${JSON.stringify(titles)}`);
+  truthy(titles.includes('Trees'), `expected Trees card, got ${JSON.stringify(titles)}`);
+  truthy(titles.includes('The Waste Land'), `expected The Waste Land card, got ${JSON.stringify(titles)}`);
+
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: openFromLibrary opens the stored blob (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  await h.openSample('trees.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 1, null, { timeout: 5_000 });
+
+  // Now navigate via the library entry (no file picker). The reader
+  // should report the same title.
+  const id = await page.evaluate(async () =>
+    (await document.getElementById('reader').getLibrary())[0].id);
+  await page.evaluate(() => document.getElementById('reader').close());
+  // Confirm closed.
+  const t1 = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.title').textContent);
+  eq(t1, '', 'title should be cleared after close()');
+
+  await page.evaluate((id) => document.getElementById('reader').openFromLibrary(id), id);
+  await page.waitForFunction(() =>
+    document.getElementById('reader').querySelector('.title').textContent === 'Trees',
+    null, { timeout: 5_000 });
+
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: removeFromLibrary drops the entry (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  await h.openSample('trees.epub');
+  await h.openSample('wasteland.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 2, null, { timeout: 5_000 });
+  const id = await page.evaluate(async () => {
+    const lib = await document.getElementById('reader').getLibrary();
+    return lib.find(e => e.title === 'Trees').id;
+  });
+  await page.evaluate((id) => document.getElementById('reader').removeFromLibrary(id), id);
+  const remaining = await page.evaluate(async () =>
+    (await document.getElementById('reader').getLibrary()).map(e => e.title));
+  eq(remaining.length, 1);
+  eq(remaining[0], 'The Waste Land');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: clearLibrary wipes everything including bookmarks + positions (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+
+  await h.openSample('trees.epub');
+  await page.evaluate(async () => {
+    const r = document.getElementById('reader');
+    await r.toggleBookmark('keep me');
+    await r.goToIndex(2);
+  });
+  await new Promise(r => setTimeout(r, 700));
+
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  const state = await page.evaluate(async () => {
+    const r = document.getElementById('reader');
+    return { lib: (await r.getLibrary()).length, bm: r.bookmarks.length };
+  });
+  eq(state.lib, 0, 'library cleared');
+  eq(state.bm, 0, 'bookmarks cleared');
+});
+
+test('library: getStorageEstimate reports usage/quota (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const est = await page.evaluate(() => document.getElementById('reader').getStorageEstimate());
+  // Browsers without the API may return null — Chromium has it.
+  if (est === null) return;
+  truthy(typeof est.usage === 'number' && est.usage >= 0, 'usage should be a number');
+  truthy(typeof est.quota === 'number' && est.quota > 0, 'quota should be > 0');
+  truthy(est.percent >= 0 && est.percent <= 100, `percent should be 0..100, got ${est.percent}`);
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;

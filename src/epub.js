@@ -319,6 +319,30 @@ export class EpubBook {
   }
 
   /**
+   * Raw Blob for the cover image, suitable for IndexedDB storage. Null
+   * if the OPF doesn't declare a cover or the entry is missing.
+   * @returns {Promise<Blob | null>}
+   */
+  async coverBlob() {
+    if (!this.#coverId) return null;
+    const item = this.#manifest.get(this.#coverId);
+    if (!item) return null;
+    try {
+      const bytes = await this.#zip.read(item.path);
+      return new Blob([/** @type {BlobPart} */ (bytes)],
+        { type: item.mediaType || 'application/octet-stream' });
+    } catch { return null; }
+  }
+
+  /**
+   * Source EPUB Blob (the bytes the reader was opened with). Used for
+   * library persistence so we can re-open a stored book without going
+   * back to disk. Null if the EpubBook was constructed without one.
+   * @returns {Blob | null}
+   */
+  sourceBlob() { return this.#source; }
+
+  /**
    * Lazily build a blob: URL for an archive resource. HTML/CSS resources
    * are processed to rewrite internal references.
    * @param {string} path
