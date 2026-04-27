@@ -35,6 +35,7 @@ import { openEpub } from './epub.js';
  * @property {HTMLDivElement}      shell
  * @property {HTMLSpanElement}     title
  * @property {HTMLSpanElement}     progress
+ * @property {HTMLSpanElement}     chapterProgress
  * @property {HTMLButtonElement}   prev
  * @property {HTMLButtonElement}   next
  * @property {HTMLButtonElement}   toggle
@@ -219,6 +220,16 @@ const COMPONENT_CSS = `
     min-inline-size: 3rem;
     text-align: center;
   }
+  .chapter-progress {
+    color: var(--color-text-muted, #888);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--font-size-2xs, 0.65rem);
+    padding-inline: 0.25rem;
+    min-inline-size: 2.5rem;
+    text-align: center;
+    opacity: .8;
+  }
+  .chapter-progress[hidden] { display: none; }
   .title { /* alias for the chrome title; kept for tests/CSS hooks */ }
 
   .body {
@@ -356,6 +367,7 @@ const TEMPLATE = `
     <div class="reader-control-group">
       <button class="reader-icon-btn prev" type="button" aria-label="Previous chapter">&larr;</button>
       <span class="progress" role="status"></span>
+      <span class="chapter-progress" aria-label="Position in chapter" title="Position in current chapter"></span>
       <button class="reader-icon-btn next" type="button" aria-label="Next chapter">&rarr;</button>
     </div>
     <div class="reader-control-group">
@@ -434,6 +446,7 @@ export class EpubReaderElement extends HTMLElement {
       shell:              this,
       title:              $('.title'),
       progress:           $('.progress'),
+      chapterProgress:    $('.chapter-progress'),
       prev:               $('.prev'),
       next:               $('.next'),
       toggle:             $('.toc-toggle'),
@@ -680,6 +693,8 @@ export class EpubReaderElement extends HTMLElement {
     // paint to avoid a visible reflow.
     this.#applyChapterThemingTo(doc);
     this.#applyTypographyTo(doc);
+    this.#applyLayoutTo(doc);
+    this.#wireChapterScroll(iframe);
 
     // Intercept in-book navigation via [data-epub-href] (set by epub.js).
     doc.addEventListener('click', (e) => {
@@ -845,6 +860,68 @@ export class EpubReaderElement extends HTMLElement {
       `a:visited { color: color-mix(in srgb, ${link} 70%, ${fg}) !important; }`,
       `hr { border-color: ${border} !important; }`,
     ].join('\n');
+  }
+
+  /**
+   * Inject layout overrides for pre-paginated (image-page) chapters so
+   * the primary image fits the viewport instead of overflowing at native
+   * size. Reflowable chapters get no layout rules (publisher CSS wins).
+   * @param {Document} doc
+   */
+  #applyLayoutTo(doc) {
+    if (doc.documentElement?.localName === 'svg') return;
+    const head = doc.head || doc.documentElement;
+    if (!head) return;
+    const id = '__epub_reader_layout';
+    let style = /** @type {HTMLStyleElement | null} */ (doc.getElementById(id));
+    const item = this.#book?.spine[this.#currentIndex];
+    const isFixed = item?.layout === 'pre-paginated';
+    if (!isFixed) {
+      // Reflowable: remove any leftover fixed-layout style from a prior chapter.
+      style?.remove();
+      return;
+    }
+    if (!style) {
+      style = doc.createElement('style');
+      style.id = id;
+      head.append(style);
+    }
+    style.textContent = [
+      `html, body { margin: 0 !important; padding: 0 !important; height: 100vh !important; width: 100vw !important; overflow: hidden !important; }`,
+      `body { display: flex !important; align-items: center !important; justify-content: center !important; }`,
+      `body img, body svg { max-inline-size: 100vw !important; max-block-size: 100vh !important; inline-size: auto !important; block-size: auto !important; object-fit: contain !important; }`,
+    ].join('\n');
+  }
+
+  /**
+   * Track scroll position inside the chapter iframe and update the
+   * `.chapter-progress` span. Reflowable chapters get a percentage,
+   * fixed-layout (image-page) chapters get nothing — there's no scroll.
+   * @param {HTMLIFrameElement} iframe
+   */
+  #wireChapterScroll(iframe) {
+    const win = iframe.contentWindow;
+    const doc = iframe.contentDocument;
+    if (!win || !doc) return;
+    const item = this.#book?.spine[this.#currentIndex];
+    const isFixed = item?.layout === 'pre-paginated';
+    const display = this.#els.chapterProgress;
+    if (isFixed) {
+      display.hidden = true;
+      display.textContent = '';
+      return;
+    }
+    display.hidden = false;
+    const update = () => {
+      const se = doc.scrollingElement || doc.documentElement;
+      const max = se.scrollHeight - se.clientHeight;
+      const pct = max > 0 ? Math.round((se.scrollTop / max) * 100) : 100;
+      display.textContent = `${pct}%`;
+    };
+    update();
+    win.addEventListener('scroll', update, { passive: true });
+    // After subresources load, the height shifts; recompute once.
+    win.addEventListener('load', update, { once: true });
   }
 
   #toggleSettings(force) {

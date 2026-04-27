@@ -30,6 +30,12 @@ export interface ManifestItem {
 export interface SpineItem extends ManifestItem {
   linear: boolean;
   index:  number;
+  /**
+   * EPUB rendition layout for this spine item. `pre-paginated` chapters
+   * (image-page / fixed-layout EPUBs like manga, illustrated books) get
+   * fit-to-viewport rendering instead of native-size scrolling.
+   */
+  layout: 'reflowable' | 'pre-paginated';
 }
 
 export interface TocEntry {

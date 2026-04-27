@@ -27,7 +27,7 @@ import { ZipArchive } from './zip.js';
  */
 
 /**
- * @typedef {ManifestItem & {linear: boolean, index: number}} SpineItem
+ * @typedef {ManifestItem & {linear: boolean, index: number, layout: 'reflowable' | 'pre-paginated'}} SpineItem
  */
 
 /**
@@ -187,6 +187,22 @@ export class EpubBook {
     const spine = doc.getElementsByTagNameNS(NS.opf, 'spine')[0]
       || doc.getElementsByTagName('spine')[0];
     if (!spine) throw new Error('OPF: missing <spine>');
+
+    // Book-level default rendition:layout. EPUB 3 publishes it via
+    // <meta property="rendition:layout">VALUE</meta> inside <metadata>;
+    // older OPFs use a `rendition:layout` attribute on <package>.
+    const pkg = doc.documentElement;
+    /** @type {'reflowable' | 'pre-paginated'} */
+    let bookLayout = 'reflowable';
+    const layoutAttr = pkg.getAttribute('rendition:layout');
+    if (layoutAttr === 'pre-paginated') bookLayout = 'pre-paginated';
+    for (const m of pkg.getElementsByTagNameNS('*', 'meta')) {
+      if (m.getAttribute('property') === 'rendition:layout') {
+        const v = m.textContent?.trim();
+        if (v === 'pre-paginated') bookLayout = 'pre-paginated';
+      }
+    }
+
     let i = 0;
     for (const ref of childrenByLocalName(spine, 'itemref')) {
       const idref = ref.getAttribute('idref');
@@ -194,6 +210,11 @@ export class EpubBook {
       const item = this.#manifest.get(idref);
       if (!item) continue;
       const linear = (ref.getAttribute('linear') || 'yes') !== 'no';
+      // Per-itemref override via properties tokens.
+      const refProps = (ref.getAttribute('properties') || '').split(/\s+/);
+      let layout = bookLayout;
+      if (refProps.includes('rendition:layout-pre-paginated')) layout = 'pre-paginated';
+      else if (refProps.includes('rendition:layout-reflowable')) layout = 'reflowable';
       this.#spine.push({
         id: item.id,
         href: item.href,
@@ -201,6 +222,7 @@ export class EpubBook {
         mediaType: item.mediaType,
         properties: item.properties,
         linear,
+        layout,
         index: i++,
       });
     }
