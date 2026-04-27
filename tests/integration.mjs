@@ -367,8 +367,15 @@ test('VB tokens: chapter iframe picks up colours set on the host', async (h, { p
     // Force chapter theming refresh by re-navigating to the same chapter.
     r.goToIndex(0);
   });
-  await h.waitChapter((doc) =>
-    doc.body && doc.body.children.length > 0 && doc.getElementById('__epub_reader_theme'));
+  // Wait until the iframe doc has actually picked up the new --color-background
+  // (between goToIndex setting src and the new chapter loading, contentDocument
+  // can briefly be the previous chapter with stale styles).
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    if (!doc?.body) return false;
+    const css = doc.getElementById('__epub_reader_theme')?.textContent || '';
+    return css.includes('#102030');
+  }, null, { timeout: 5_000 });
   const computed = await page.evaluate(() => {
     const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
     const cs = doc.defaultView.getComputedStyle(doc.body);
@@ -909,6 +916,237 @@ test('position: stale spineIndex (out of range) is ignored (issue #12)', async (
       req.onsuccess = req.onerror = req.onblocked = () => resolve();
     });
   });
+});
+
+test('bookmarks: toggleBookmark adds/removes at current position (issue #13)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(3));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  // Add via the public API.
+  const bm = await page.evaluate(() => document.getElementById('reader').toggleBookmark('first one'));
+  truthy(bm, 'toggleBookmark should return the new bookmark');
+  eq(bm.spineIndex, 3);
+  eq(bm.label, 'first one');
+  // Same call removes it (toggle).
+  const removed = await page.evaluate(() => document.getElementById('reader').toggleBookmark());
+  eq(removed, null, 'second toggle should remove and return null');
+  const list = await page.evaluate(() => document.getElementById('reader').bookmarks);
+  eq(list.length, 0, 'list should be empty after toggle off');
+});
+
+test('bookmarks: list renders + click jumps to chapter (issue #13)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  // Start fresh — wipe any bookmarks left by prior tests for this book.
+  await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return Promise.all(r.bookmarks.map(b => r.removeBookmark(b.id)));
+  });
+  // Bookmark chapter 5 then chapter 10, jump back to 0, click the chapter 5
+  // bookmark in the panel, verify we land there.
+  await page.evaluate(async () => {
+    const r = document.getElementById('reader');
+    await r.goToIndex(5); await r.toggleBookmark('Five');
+    await r.goToIndex(10); await r.toggleBookmark('Ten');
+    await r.goToIndex(0);
+  });
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  const renderedLabels = await page.evaluate(() =>
+    [...document.getElementById('reader').querySelectorAll('.bm-list .bm-label')]
+      .map(l => l.textContent.trim()));
+  eq(renderedLabels.length, 2, `expected 2 bookmarks rendered, got ${renderedLabels.length}`);
+  truthy(renderedLabels.includes('Five') && renderedLabels.includes('Ten'),
+    `expected 'Five' and 'Ten' labels, got ${JSON.stringify(renderedLabels)}`);
+
+  // Click the bookmark whose label is "Five".
+  await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const li = [...r.querySelectorAll('.bm-list li')]
+      .find(li => li.querySelector('.bm-label').textContent.trim() === 'Five');
+    li.querySelector('.bm-jump').click();
+  });
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  const progress = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  eq(progress, '6 / 144', 'click on "Five" bookmark should land on chapter 5');
+});
+
+test('bookmarks: keyboard "b" toggles a bookmark (issue #13)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  // Wipe any leftovers from a prior test on this book.
+  await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return Promise.all(r.bookmarks.map(b => r.removeBookmark(b.id)));
+  });
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'b', bubbles: true }));
+  });
+  let len = await page.evaluate(() => document.getElementById('reader').bookmarks.length);
+  eq(len, 1, '`b` should add a bookmark');
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'b', bubbles: true }));
+  });
+  len = await page.evaluate(() => document.getElementById('reader').bookmarks.length);
+  eq(len, 0, 'second `b` should remove the bookmark at this position');
+});
+
+test('bookmarks: persist across reload (issue #13)', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.setInputFiles('#file', join(SAMPLES, 'trees.epub'));
+  await page.waitForFunction(() => document.getElementById('reader')?.querySelector('.title')?.textContent);
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(async () => {
+    const r = document.getElementById('reader');
+    // Wipe any prior bookmarks for this book.
+    await Promise.all(r.bookmarks.map(b => r.removeBookmark(b.id)));
+    await r.goToIndex(1);
+    await r.toggleBookmark('persist test');
+  });
+  await new Promise(r => setTimeout(r, 200));
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.setInputFiles('#file', join(SAMPLES, 'trees.epub'));
+  await page.waitForFunction(() => document.getElementById('reader')?.bookmarks?.length > 0,
+    null, { timeout: 6_000 });
+  const bookmarks = await page.evaluate(() => document.getElementById('reader').bookmarks);
+  eq(bookmarks.length, 1);
+  eq(bookmarks[0].label, 'persist test');
+  eq(bookmarks[0].spineIndex, 1);
+  // Cleanup.
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase('epub-reader');
+      req.onsuccess = req.onerror = req.onblocked = () => resolve();
+    });
+  });
+});
+
+test('library: opening a book auto-adds it (issue #14)', async (h, { page }) => {
+  // Wipe via the public API so we don't fight the page-context restriction.
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+
+  await h.openSample('moby-dick.epub');
+  // The persist runs fire-and-forget — wait for the entry to land.
+  await page.waitForFunction(async () => {
+    const lib = await document.getElementById('reader').getLibrary();
+    return lib.length > 0 && lib[0].title === 'Moby-Dick';
+  }, null, { timeout: 5_000 });
+  const lib = await page.evaluate(() => document.getElementById('reader').getLibrary());
+  eq(lib.length, 1, 'expected one library entry after opening one book');
+  eq(lib[0].title, 'Moby-Dick');
+  truthy(lib[0].size > 0, 'library entry should record blob.size');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: panel renders cards for stored books (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+
+  // Open three different books so the library has something to show.
+  await h.openSample('trees.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 1, null, { timeout: 5_000 });
+  await h.openSample('wasteland.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 2, null, { timeout: 5_000 });
+  await h.openSample('moby-dick.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 3, null, { timeout: 5_000 });
+
+  // Open the panel and verify cards are rendered.
+  await page.click('.library-toggle');
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return !r.querySelector('.library-panel').hidden &&
+           r.querySelectorAll('.lib-list li').length === 3;
+  }, null, { timeout: 5_000 });
+  const titles = await page.evaluate(() =>
+    [...document.getElementById('reader').querySelectorAll('.lib-list .lib-title')]
+      .map(t => t.textContent.trim()));
+  truthy(titles.includes('Moby-Dick'), `expected Moby-Dick card, got ${JSON.stringify(titles)}`);
+  truthy(titles.includes('Trees'), `expected Trees card, got ${JSON.stringify(titles)}`);
+  truthy(titles.includes('The Waste Land'), `expected The Waste Land card, got ${JSON.stringify(titles)}`);
+
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: openFromLibrary opens the stored blob (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  await h.openSample('trees.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 1, null, { timeout: 5_000 });
+
+  // Now navigate via the library entry (no file picker). The reader
+  // should report the same title.
+  const id = await page.evaluate(async () =>
+    (await document.getElementById('reader').getLibrary())[0].id);
+  await page.evaluate(() => document.getElementById('reader').close());
+  // Confirm closed.
+  const t1 = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.title').textContent);
+  eq(t1, '', 'title should be cleared after close()');
+
+  await page.evaluate((id) => document.getElementById('reader').openFromLibrary(id), id);
+  await page.waitForFunction(() =>
+    document.getElementById('reader').querySelector('.title').textContent === 'Trees',
+    null, { timeout: 5_000 });
+
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: removeFromLibrary drops the entry (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  await h.openSample('trees.epub');
+  await h.openSample('wasteland.epub');
+  await page.waitForFunction(async () =>
+    (await document.getElementById('reader').getLibrary()).length === 2, null, { timeout: 5_000 });
+  const id = await page.evaluate(async () => {
+    const lib = await document.getElementById('reader').getLibrary();
+    return lib.find(e => e.title === 'Trees').id;
+  });
+  await page.evaluate((id) => document.getElementById('reader').removeFromLibrary(id), id);
+  const remaining = await page.evaluate(async () =>
+    (await document.getElementById('reader').getLibrary()).map(e => e.title));
+  eq(remaining.length, 1);
+  eq(remaining[0], 'The Waste Land');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('library: clearLibrary wipes everything including bookmarks + positions (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+
+  await h.openSample('trees.epub');
+  await page.evaluate(async () => {
+    const r = document.getElementById('reader');
+    await r.toggleBookmark('keep me');
+    await r.goToIndex(2);
+  });
+  await new Promise(r => setTimeout(r, 700));
+
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  const state = await page.evaluate(async () => {
+    const r = document.getElementById('reader');
+    return { lib: (await r.getLibrary()).length, bm: r.bookmarks.length };
+  });
+  eq(state.lib, 0, 'library cleared');
+  eq(state.bm, 0, 'bookmarks cleared');
+});
+
+test('library: getStorageEstimate reports usage/quota (issue #14)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const est = await page.evaluate(() => document.getElementById('reader').getStorageEstimate());
+  // Browsers without the API may return null — Chromium has it.
+  if (est === null) return;
+  truthy(typeof est.usage === 'number' && est.usage >= 0, 'usage should be a number');
+  truthy(typeof est.quota === 'number' && est.quota > 0, 'quota should be > 0');
+  truthy(est.percent >= 0 && est.percent <= 100, `percent should be 0..100, got ${est.percent}`);
 });
 
 // ---------- runner ----------

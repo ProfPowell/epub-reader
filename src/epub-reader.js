@@ -27,9 +27,39 @@
 //   epub-error       detail: { error }
 
 import { openEpub } from './epub.js';
-import { dbGet, dbPut } from './storage.js';
+import { dbGet, dbPut, dbDelete, dbGetAll, dbClear } from './storage.js';
 /** @typedef {import('./epub.js').EpubBook} EpubBook */
 /** @typedef {import('./epub.js').TocEntry} TocEntry */
+
+/**
+ * One user bookmark within a book.
+ *
+ * @typedef {object} Bookmark
+ * @property {string} id              Stable random id for diffing/removal.
+ * @property {number} spineIndex
+ * @property {number} scrollFraction  0..1 within the chapter.
+ * @property {string} chapterTitle    Captured at create time (TOC label).
+ * @property {string} label           Optional user-supplied label.
+ * @property {string} snippet         ~120 chars of surrounding text.
+ * @property {number} createdAt       `Date.now()` at create time.
+ */
+
+/**
+ * One stored library entry. The whole record (including the source
+ * blob) lives in IndexedDB so the user doesn't need to re-pick the
+ * file to keep reading.
+ *
+ * @typedef {object} LibraryEntry
+ * @property {string}     id            Same shape as EpubBook.bookId().
+ * @property {string}     title
+ * @property {string}     creator
+ * @property {string}     identifier    dc:identifier from the OPF (may be empty).
+ * @property {Blob}       blob          Original EPUB bytes.
+ * @property {Blob | null} cover        Cover image blob (may be null).
+ * @property {number}     size          blob.size, denormalised for cheap reads.
+ * @property {number}     addedAt
+ * @property {number}     lastOpenedAt
+ */
 
 /**
  * Persisted reading-position record stored under
@@ -74,6 +104,17 @@ import { dbGet, dbPut } from './storage.js';
  * @property {HTMLTextAreaElement} sUserCss
  * @property {HTMLButtonElement}   sReset
  * @property {HTMLButtonElement}   sClose
+ * @property {HTMLButtonElement}   bookmarksToggle
+ * @property {HTMLElement}         bookmarksPanel
+ * @property {HTMLButtonElement}   bmAdd
+ * @property {HTMLButtonElement}   bmClose
+ * @property {HTMLOListElement}    bmList
+ * @property {HTMLButtonElement}   libraryToggle
+ * @property {HTMLElement}         libraryPanel
+ * @property {HTMLOListElement}    libList
+ * @property {HTMLElement}         libQuota
+ * @property {HTMLButtonElement}   libClear
+ * @property {HTMLButtonElement}   libClose
  */
 
 /**
@@ -363,6 +404,203 @@ const COMPONENT_CSS = `
     font-size: var(--font-size-s, 0.9rem);
   }
   .settings-panel[hidden] { display: none; }
+
+  /* Bookmarks panel: same layout idea as settings, but a list-of-items affordance. */
+  .bookmarks-panel {
+    position: absolute;
+    inset-block-start: calc(100% + 0.25rem);
+    inset-inline-end: var(--size-s, 0.75rem);
+    z-index: 4;
+    inline-size: min(22rem, calc(100vw - 1rem));
+    max-block-size: min(70vh, 32rem);
+    overflow: auto;
+    background: var(--color-surface, #fbfaf7);
+    color: var(--color-text, #1f1f1f);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-m, 0.5rem);
+    box-shadow: var(--shadow-l, 0 8px 24px rgba(0, 0, 0, 0.12));
+    padding: 0.75rem;
+    display: grid;
+    gap: 0.5rem;
+    font-size: var(--font-size-s, 0.9rem);
+  }
+  .bookmarks-panel[hidden] { display: none; }
+  .bookmarks-panel h3 {
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-muted, #667085);
+    margin: 0;
+  }
+  .bookmarks-panel .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  }
+  .bookmarks-panel button {
+    font: inherit; color: inherit;
+    background: transparent;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.35rem);
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+  }
+  .bookmarks-panel button.primary {
+    background: var(--color-interactive, #2d6cdf);
+    color: var(--color-interactive-text, white);
+    border-color: transparent;
+  }
+  .bookmarks-panel .bm-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
+  .bookmarks-panel .bm-list li {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.25rem 0.5rem;
+    align-items: start;
+    padding: 0.35rem 0.5rem;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+  }
+  .bookmarks-panel .bm-list li:hover { background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 6%, transparent); }
+  .bookmarks-panel .bm-list .bm-jump {
+    text-align: start; padding: 0; border: 0; background: transparent;
+    cursor: pointer; color: inherit; min-inline-size: 0;
+  }
+  .bookmarks-panel .bm-list .bm-label { font-weight: 600; }
+  .bookmarks-panel .bm-list .bm-meta {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+    line-height: 1.3;
+  }
+  .bookmarks-panel .bm-list .bm-snippet {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+    line-height: 1.4;
+  }
+  .bookmarks-panel .bm-list .bm-remove {
+    inline-size: 1.5rem; block-size: 1.5rem;
+    display: inline-grid; place-items: center;
+    border-radius: 999px; padding: 0; font-size: 0.9em;
+  }
+  .bookmarks-panel .bm-empty {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+    text-align: center;
+    padding-block: 0.5rem;
+  }
+  .bookmarks-panel:not([data-empty="true"]) .bm-empty { display: none; }
+  .bookmarks-panel[data-empty="true"] .bm-list { display: none; }
+  /* Solid star when bookmark exists at current position. */
+  :scope([data-bookmark-active]) .bookmarks-toggle::before { content: ''; }
+
+  /* Library panel: full-width overlay so cards have room to breathe. */
+  .library-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: var(--color-background, #fbfaf7);
+    color: var(--color-text, #1f1f1f);
+    padding: var(--size-m, 1rem);
+    overflow: auto;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: var(--size-s, 0.75rem);
+  }
+  .library-panel[hidden] { display: none; }
+  .library-panel .lib-header {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+  }
+  .library-panel h3 {
+    margin: 0;
+    font-size: var(--font-size-m, 1rem);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-muted, #667085);
+  }
+  .library-panel .lib-quota {
+    color: var(--color-text-muted, #667085);
+    font-size: var(--font-size-2xs, 0.7rem);
+    font-variant-numeric: tabular-nums;
+  }
+  .library-panel .lib-quota[data-warn="true"] { color: #b42318; font-weight: 600; }
+  .library-panel .lib-list {
+    list-style: none; margin: 0; padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+    gap: var(--size-s, 0.75rem);
+    align-content: start;
+  }
+  .library-panel .lib-list li {
+    position: relative;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-m, 0.5rem);
+    padding: 0.5rem;
+    background: var(--color-surface, #fff);
+    display: grid; gap: 0.35rem;
+  }
+  .library-panel .lib-list .lib-cover {
+    aspect-ratio: 2/3;
+    inline-size: 100%;
+    border-radius: var(--radius-s, 0.25rem);
+    background: color-mix(in srgb, var(--color-text-muted, #999) 12%, transparent);
+    display: grid; place-items: center;
+    overflow: hidden;
+    font-size: 0.75rem; color: var(--color-text-muted, #667085);
+  }
+  .library-panel .lib-list .lib-cover img {
+    inline-size: 100%; block-size: 100%; object-fit: cover; display: block;
+  }
+  .library-panel .lib-list .lib-title {
+    font-weight: 600;
+    line-height: 1.25;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .library-panel .lib-list .lib-meta {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+  }
+  .library-panel .lib-list .lib-open {
+    text-align: start; padding: 0; margin: 0; border: 0;
+    background: transparent; color: inherit; cursor: pointer;
+    display: contents;
+  }
+  .library-panel .lib-list .lib-remove {
+    position: absolute;
+    inset-block-start: 0.25rem;
+    inset-inline-end: 0.25rem;
+    inline-size: 1.6rem; block-size: 1.6rem;
+    display: inline-grid; place-items: center;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-background, #fff) 80%, transparent);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    color: inherit;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0;
+  }
+  .library-panel .lib-empty {
+    color: var(--color-text-muted, #667085);
+    text-align: center;
+    padding: 2rem 1rem;
+  }
+  .library-panel:not([data-empty="true"]) .lib-empty { display: none; }
+  .library-panel[data-empty="true"] .lib-list { display: none; }
+  .library-panel .row {
+    display: flex; justify-content: space-between; gap: 0.5rem;
+  }
+  .library-panel button {
+    font: inherit; color: inherit;
+    background: transparent;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.35rem);
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+  }
+  .library-panel button.primary {
+    background: var(--color-interactive, #2d6cdf);
+    color: var(--color-interactive-text, white);
+    border-color: transparent;
+  }
   .settings-panel h3 {
     font-size: var(--font-size-2xs, 0.7rem);
     text-transform: uppercase; letter-spacing: 0.08em;
@@ -455,6 +693,8 @@ const TEMPLATE = `
     <div class="reader-control-group">
       <button class="reader-icon-btn font-decrease" type="button" aria-label="Decrease font size">A&minus;</button>
       <button class="reader-icon-btn font-increase" type="button" aria-label="Increase font size">A+</button>
+      <button class="reader-icon-btn bookmarks-toggle" type="button" aria-label="Bookmarks" aria-expanded="false" aria-pressed="false" title="Bookmarks (b to toggle)">&#9734;</button>
+      <button class="reader-icon-btn library-toggle" type="button" aria-label="Library" aria-expanded="false" title="Library">&#128218;</button>
       <button class="reader-icon-btn settings-toggle" type="button" aria-label="Reading settings" aria-expanded="false" title="Reading settings">Aa</button>
     </div>
   </div>
@@ -514,6 +754,27 @@ const TEMPLATE = `
         <button type="button" class="s-close primary">Done</button>
       </div>
     </aside>
+    <aside class="bookmarks-panel" role="dialog" aria-label="Bookmarks" hidden>
+      <h3>Bookmarks</h3>
+      <div class="row">
+        <button type="button" class="bm-add primary">Bookmark this page</button>
+        <button type="button" class="bm-close">Done</button>
+      </div>
+      <ol class="bm-list" aria-live="polite"></ol>
+      <div class="bm-empty">No bookmarks yet — press <kbd>b</kbd> or use the button above.</div>
+    </aside>
+    <aside class="library-panel" role="dialog" aria-label="Library" hidden>
+      <header class="lib-header">
+        <h3>Library</h3>
+        <span class="lib-quota" aria-live="polite"></span>
+      </header>
+      <ol class="lib-list" aria-live="polite"></ol>
+      <div class="lib-empty">No books stored yet — opening a book adds it here automatically.</div>
+      <div class="row">
+        <button type="button" class="lib-clear">Clear all</button>
+        <button type="button" class="lib-close primary">Done</button>
+      </div>
+    </aside>
     <iframe sandbox="allow-same-origin" title="EPUB content"></iframe>
     <div class="overlay">
       <div class="message">Drop an EPUB file here or choose one to begin.</div>
@@ -571,6 +832,17 @@ export class EpubReaderElement extends HTMLElement {
       sUserCss:           $('.s-user-css'),
       sReset:             $('.s-reset'),
       sClose:             $('.s-close'),
+      bookmarksToggle:    $('.bookmarks-toggle'),
+      bookmarksPanel:     $('.bookmarks-panel'),
+      bmAdd:              $('.bm-add'),
+      bmClose:            $('.bm-close'),
+      bmList:             $('.bm-list'),
+      libraryToggle:      $('.library-toggle'),
+      libraryPanel:       $('.library-panel'),
+      libList:            $('.lib-list'),
+      libQuota:           $('.lib-quota'),
+      libClear:           $('.lib-clear'),
+      libClose:           $('.lib-close'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
@@ -578,6 +850,17 @@ export class EpubReaderElement extends HTMLElement {
     this.#els.settingsToggle.addEventListener('click', () => this.#toggleSettings());
     this.#els.fontDecrease.addEventListener('click', () => this.#stepFontSize(-10));
     this.#els.fontIncrease.addEventListener('click', () => this.#stepFontSize(+10));
+    this.#els.bookmarksToggle.addEventListener('click', () => this.#toggleBookmarksPanel());
+    this.#els.bmAdd.addEventListener('click', () => this.toggleBookmark());
+    this.#els.bmClose.addEventListener('click', () => this.#toggleBookmarksPanel(false));
+    this.#els.libraryToggle.addEventListener('click', () => this.#toggleLibraryPanel());
+    this.#els.libClose.addEventListener('click', () => this.#toggleLibraryPanel(false));
+    this.#els.libClear.addEventListener('click', async () => {
+      // Confirm via the host page's `confirm()` so screen readers see it.
+      if (!confirm('Remove all books, bookmarks, and reading positions?')) return;
+      await this.clearLibrary();
+      await this.#renderLibrary();
+    });
     this.#els.iframe.addEventListener('load', () => this.#onIframeLoad());
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
     this.#wireSettingsControls();
@@ -658,6 +941,8 @@ export class EpubReaderElement extends HTMLElement {
       // restored chapter and skip rendering the start-of-book first.
       this.#bookId = await book.bookId().catch(() => null);
       const stored = this.#bookId ? await dbGet('positions', this.#bookId) : null;
+      // Load bookmarks for this book before rendering.
+      await this.#loadBookmarks();
 
       const startAttr = Number(this.getAttribute('start') || 0) || 0;
       const startIndex = Math.max(0, Math.min(book.spine.length - 1, startAttr));
@@ -691,6 +976,9 @@ export class EpubReaderElement extends HTMLElement {
         await this.goToIndex(startIndex);
       }
       this.#hideOverlay();
+      // Auto-add to the library (persist source blob + metadata + cover).
+      // Don't block the reader on it — fire and forget.
+      this.#persistLibraryEntry(book).catch(() => { /* swallow */ });
     } catch (err) {
       if (token !== this.#loadToken) return;
       this.#setOverlay(String(err?.message || err), true);
@@ -767,10 +1055,420 @@ export class EpubReaderElement extends HTMLElement {
     await dbPut('positions', record);
   }
 
+  // ------- bookmarks -------
+
+  /**
+   * In-memory cache of the current book's bookmarks. The persisted shape
+   * in IndexedDB is `{ id: bookId, items: Bookmark[] }` — one record per
+   * book, list-of-items inside, so add/remove are simple put-the-record
+   * round-trips and listing for a single book is a single get.
+   *
+   * @type {Bookmark[]}
+   */
+  #bookmarks = [];
+
+  /** @returns {Promise<void>} */
+  async #loadBookmarks() {
+    this.#bookmarks = [];
+    if (!this.#bookId) { this.#renderBookmarks(); return; }
+    const rec = await dbGet('bookmarks', this.#bookId);
+    if (rec && Array.isArray(rec.items)) this.#bookmarks = rec.items;
+    this.#renderBookmarks();
+    this.#updateBookmarkButton();
+  }
+
+  /** @returns {Promise<void>} */
+  async #saveBookmarks() {
+    if (!this.#bookId) return;
+    await dbPut('bookmarks', {
+      id: this.#bookId,
+      items: this.#bookmarks,
+      updatedAt: Date.now(),
+    });
+  }
+
+  /** Read-only snapshot of the current book's bookmarks. */
+  get bookmarks() { return this.#bookmarks.map(b => ({ ...b })); }
+
+  /** True if a bookmark exists at (close to) the current position. */
+  #bookmarkAtCurrent() {
+    return this.#bookmarks.find(b =>
+      b.spineIndex === this.#currentIndex &&
+      Math.abs(b.scrollFraction - this.#currentScrollFraction()) < 0.05
+    ) || null;
+  }
+
+  /** @returns {number} */
+  #currentScrollFraction() {
+    if (this.#typography.layoutMode === 'paginated') {
+      const info = this.#pageInfo();
+      return info ? (info.current - 1) / Math.max(1, info.total) : 0;
+    }
+    const doc = this.#els.iframe.contentDocument;
+    const se = doc?.scrollingElement || doc?.documentElement;
+    if (!se) return 0;
+    const max = se.scrollHeight - se.clientHeight;
+    return max > 0 ? Math.min(1, Math.max(0, se.scrollTop / max)) : 0;
+  }
+
+  /**
+   * Add or remove a bookmark at the current position. Used by both the
+   * panel "Bookmark this page" button and the `b` keyboard shortcut.
+   * @param {string} [label]  Optional label; defaults to the chapter title.
+   * @returns {Promise<Bookmark | null>}
+   *   The newly created bookmark, or null if a bookmark was removed.
+   */
+  async toggleBookmark(label) {
+    if (!this.#book || !this.#bookId) return null;
+    const existing = this.#bookmarkAtCurrent();
+    if (existing) {
+      this.#bookmarks = this.#bookmarks.filter(b => b.id !== existing.id);
+      await this.#saveBookmarks();
+      this.#renderBookmarks();
+      this.#updateBookmarkButton();
+      this.#emitBookmarksChange();
+      return null;
+    }
+    /** @type {Bookmark} */
+    const bm = {
+      id: 'bm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
+      spineIndex: this.#currentIndex,
+      scrollFraction: this.#currentScrollFraction(),
+      chapterTitle: this.#tocLabelForPath(this.#book.spine[this.#currentIndex]?.path || ''),
+      label: label || '',
+      snippet: this.#captureSnippet(),
+      createdAt: Date.now(),
+    };
+    this.#bookmarks = [...this.#bookmarks, bm].sort((a, b) =>
+      a.spineIndex - b.spineIndex || a.scrollFraction - b.scrollFraction);
+    await this.#saveBookmarks();
+    this.#renderBookmarks();
+    this.#updateBookmarkButton();
+    this.#emitBookmarksChange();
+    return bm;
+  }
+
+  /**
+   * Remove a bookmark by id.
+   * @param {string} id
+   * @returns {Promise<boolean>} true if a bookmark was removed.
+   */
+  async removeBookmark(id) {
+    const before = this.#bookmarks.length;
+    this.#bookmarks = this.#bookmarks.filter(b => b.id !== id);
+    if (this.#bookmarks.length === before) return false;
+    await this.#saveBookmarks();
+    this.#renderBookmarks();
+    this.#updateBookmarkButton();
+    this.#emitBookmarksChange();
+    return true;
+  }
+
+  /**
+   * Jump to a bookmark. Mirrors the position-restore flow so layout
+   * settles before the scrollFraction re-applies.
+   * @param {string} id
+   */
+  async goToBookmark(id) {
+    const bm = this.#bookmarks.find(b => b.id === id);
+    if (!bm || !this.#book) return;
+    if (bm.spineIndex < 0 || bm.spineIndex >= this.#book.spine.length) return;
+    await this.goToIndex(bm.spineIndex);
+    this.#applyRestoredScroll(bm.scrollFraction);
+  }
+
+  /**
+   * Capture ~120 chars of visible chapter text near the current scroll
+   * position, for the bookmark snippet.
+   * @returns {string}
+   */
+  #captureSnippet() {
+    const doc = this.#els.iframe.contentDocument;
+    const text = (doc?.body?.textContent || '').trim().replace(/\s+/g, ' ');
+    if (!text) return '';
+    const frac = this.#currentScrollFraction();
+    const start = Math.max(0, Math.floor(text.length * frac) - 20);
+    return text.slice(start, start + 120).trim();
+  }
+
+  #renderBookmarks() {
+    const ol = this.#els.bmList;
+    ol.innerHTML = '';
+    const panel = this.#els.bookmarksPanel;
+    panel.dataset.empty = String(this.#bookmarks.length === 0);
+    for (const bm of this.#bookmarks) {
+      const li = document.createElement('li');
+      li.dataset.bookmarkId = bm.id;
+      const jump = document.createElement('button');
+      jump.type = 'button';
+      jump.className = 'bm-jump';
+      const labelEl = document.createElement('span');
+      labelEl.className = 'bm-label';
+      labelEl.textContent = bm.label || bm.chapterTitle || '(unnamed)';
+      const meta = document.createElement('span');
+      meta.className = 'bm-meta';
+      const pct = Math.round((bm.scrollFraction || 0) * 100);
+      meta.textContent = `${bm.chapterTitle || `Chapter ${bm.spineIndex + 1}`} · ${pct}%`;
+      const snippet = document.createElement('span');
+      snippet.className = 'bm-snippet';
+      snippet.textContent = bm.snippet || '';
+      jump.append(labelEl, document.createElement('br'), meta);
+      if (bm.snippet) jump.append(document.createElement('br'), snippet);
+      jump.addEventListener('click', () => this.goToBookmark(bm.id));
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'bm-remove';
+      remove.setAttribute('aria-label', 'Remove bookmark');
+      remove.textContent = '×';
+      remove.addEventListener('click', (e) => { e.stopPropagation(); this.removeBookmark(bm.id); });
+      li.append(jump, remove);
+      ol.append(li);
+    }
+  }
+
+  #updateBookmarkButton() {
+    const active = !!this.#bookmarkAtCurrent();
+    this.#els.bookmarksToggle.setAttribute('aria-pressed', String(active));
+    // Swap glyph: ★ when active, ☆ when not.
+    this.#els.bookmarksToggle.textContent = active ? '★' : '☆';
+    this.toggleAttribute('data-bookmark-active', active);
+  }
+
+  #toggleBookmarksPanel(force) {
+    const open = typeof force === 'boolean' ? force : this.#els.bookmarksPanel.hidden;
+    this.#els.bookmarksPanel.hidden = !open;
+    this.#els.bookmarksToggle.setAttribute('aria-expanded', String(open));
+    if (open) {
+      // Close the settings + library panels — only one popover at a time.
+      this.#els.settingsPanel.hidden = true;
+      this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
+      this.#els.libraryPanel.hidden = true;
+      this.#els.libraryToggle.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  #emitBookmarksChange() {
+    this.dispatchEvent(new CustomEvent('epub-bookmarks-change', {
+      detail: { bookmarks: this.bookmarks },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  // ------- library -------
+
+  /**
+   * Persist the just-opened book into the library store: source blob
+   * (so we can re-open it later without re-fetching), metadata
+   * (title/creator/identifier), cover thumbnail blob, addedAt /
+   * lastOpenedAt timestamps. Idempotent — re-opening the same book
+   * just bumps lastOpenedAt.
+   *
+   * @param {EpubBook} book
+   */
+  async #persistLibraryEntry(book) {
+    if (!this.#bookId) return;
+    /** @type {Blob | null} */
+    const source = book.sourceBlob();
+    if (!source) return;
+    const existing = await dbGet('library', this.#bookId);
+    /** @type {Blob | null} */
+    const cover = existing?.cover || await book.coverBlob();
+    const meta = book.metadata;
+    /** @type {LibraryEntry} */
+    const record = {
+      id: this.#bookId,
+      title: meta.title || '(untitled)',
+      creator: meta.creator || '',
+      identifier: meta.identifier || '',
+      blob: source,
+      cover,
+      size: source.size,
+      addedAt: existing?.addedAt || Date.now(),
+      lastOpenedAt: Date.now(),
+    };
+    await dbPut('library', record);
+    this.dispatchEvent(new CustomEvent('epub-library-change', {
+      detail: { reason: 'added', id: this.#bookId },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  /**
+   * Read-only snapshot of all books in the library, sorted by most
+   * recently opened. Each entry is a clone — mutations don't leak.
+   *
+   * @returns {Promise<LibraryEntry[]>}
+   */
+  async getLibrary() {
+    /** @type {LibraryEntry[]} */
+    const rows = await dbGetAll('library');
+    return rows.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0))
+      .map(r => ({ ...r }));
+  }
+
+  /**
+   * Open a previously stored library entry. Convenience wrapper around
+   * `open(blob)` that pulls the saved source from IDB.
+   *
+   * @param {string} id  Library entry id (same shape as bookId()).
+   */
+  async openFromLibrary(id) {
+    const rec = /** @type {LibraryEntry | null} */ (await dbGet('library', id));
+    if (!rec?.blob) return;
+    await this.open(rec.blob);
+  }
+
+  /**
+   * Remove a book from the library (does not touch positions or
+   * bookmarks for that book — they stay until manually cleared).
+   * @param {string} id
+   */
+  async removeFromLibrary(id) {
+    await dbDelete('library', id);
+    this.dispatchEvent(new CustomEvent('epub-library-change', {
+      detail: { reason: 'removed', id },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  /** Drop every library entry (and reading positions / bookmarks). */
+  async clearLibrary() {
+    await dbClear('library');
+    await dbClear('positions');
+    await dbClear('bookmarks');
+    // Reflect the wipe in the open book's in-memory state so the UI
+    // updates without a reload.
+    this.#bookmarks = [];
+    this.#renderBookmarks();
+    this.#updateBookmarkButton();
+    this.dispatchEvent(new CustomEvent('epub-library-change', {
+      detail: { reason: 'cleared', id: null },
+      bubbles: true, composed: true,
+    }));
+  }
+
+  /**
+   * Best-effort storage estimate (bytes used, bytes available, percent).
+   * Returns null on browsers without navigator.storage.estimate().
+   * @returns {Promise<{usage: number, quota: number, percent: number} | null>}
+   */
+  async getStorageEstimate() {
+    if (!navigator.storage?.estimate) return null;
+    try {
+      const est = await navigator.storage.estimate();
+      const usage = est.usage || 0;
+      const quota = est.quota || 0;
+      const percent = quota > 0 ? Math.round((usage / quota) * 100) : 0;
+      return { usage, quota, percent };
+    } catch { return null; }
+  }
+
+  async #toggleLibraryPanel(force) {
+    const wasOpen = !this.#els.libraryPanel.hidden;
+    const open = typeof force === 'boolean' ? force : !wasOpen;
+    this.#els.libraryPanel.hidden = !open;
+    this.#els.libraryToggle.setAttribute('aria-expanded', String(open));
+    if (open) {
+      // Mutually-exclusive popovers.
+      this.#els.bookmarksPanel.hidden = true;
+      this.#els.bookmarksToggle.setAttribute('aria-expanded', 'false');
+      this.#els.settingsPanel.hidden = true;
+      this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
+      await this.#renderLibrary();
+    }
+  }
+
+  async #renderLibrary() {
+    /** @type {LibraryEntry[]} */
+    const entries = await this.getLibrary();
+    const ol = this.#els.libList;
+    const panel = this.#els.libraryPanel;
+    panel.dataset.empty = String(entries.length === 0);
+    ol.innerHTML = '';
+    /** @type {string[]} */
+    const transientUrls = [];
+    for (const entry of entries) {
+      const li = document.createElement('li');
+      li.dataset.bookId = entry.id;
+
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'lib-open';
+      open.setAttribute('aria-label', `Open ${entry.title}`);
+
+      const cover = document.createElement('div');
+      cover.className = 'lib-cover';
+      if (entry.cover) {
+        const url = URL.createObjectURL(entry.cover);
+        transientUrls.push(url);
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = '';
+        img.loading = 'lazy';
+        cover.append(img);
+      } else {
+        cover.textContent = 'no cover';
+      }
+
+      const title = document.createElement('span');
+      title.className = 'lib-title';
+      title.textContent = entry.title;
+
+      const meta = document.createElement('span');
+      meta.className = 'lib-meta';
+      const parts = [];
+      if (entry.creator) parts.push(entry.creator);
+      parts.push(formatBytes(entry.size));
+      meta.textContent = parts.join(' · ');
+
+      open.append(cover, title, meta);
+      open.addEventListener('click', async () => {
+        await this.#toggleLibraryPanel(false);
+        await this.openFromLibrary(entry.id);
+      });
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'lib-remove';
+      remove.setAttribute('aria-label', `Remove ${entry.title} from library`);
+      remove.textContent = '×';
+      remove.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Remove "${entry.title}" from the library?`)) return;
+        await this.removeFromLibrary(entry.id);
+        await this.#renderLibrary();
+      });
+
+      li.append(open, remove);
+      ol.append(li);
+    }
+    // Free transient cover URLs after a tick so <img> has time to start
+    // loading. The browser keeps the bytes alive while the load is in
+    // flight, so revoking is safe.
+    if (transientUrls.length) {
+      setTimeout(() => transientUrls.forEach(URL.revokeObjectURL), 5_000);
+    }
+
+    // Quota text — warn at >= 80%.
+    const est = await this.getStorageEstimate();
+    if (est && est.quota > 0) {
+      this.#els.libQuota.textContent =
+        `${formatBytes(est.usage)} of ${formatBytes(est.quota)} used (${est.percent}%)`;
+      this.#els.libQuota.dataset.warn = String(est.percent >= 80);
+    } else {
+      this.#els.libQuota.textContent = '';
+      delete this.#els.libQuota.dataset.warn;
+    }
+  }
+
   /** Unload the current book and revoke any blob URLs it created. */
   close() {
     this.#currentIndex = -1;
     if (this.#book) { this.#book.destroy(); this.#book = null; }
+    this.#bookId = null;
+    this.#bookmarks = [];
+    this.#renderBookmarks();
+    this.#updateBookmarkButton();
     this.#els.iframe.removeAttribute('src');
     this.#els.toc.innerHTML = '';
     this.#els.title.textContent = '';
@@ -846,6 +1544,7 @@ export class EpubReaderElement extends HTMLElement {
     this.#els.prev.disabled = this.#currentIndex <= 0;
     this.#els.next.disabled = this.#currentIndex >= this.#book.spine.length - 1;
     this.#highlightToc();
+    this.#updateBookmarkButton();
   }
 
   #renderToc() {
@@ -1006,6 +1705,9 @@ export class EpubReaderElement extends HTMLElement {
       e.preventDefault();
     } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
       if (paginated) this.#pagePrev(); else this.prev();
+      e.preventDefault();
+    } else if (e.key === 'b' || e.key === 'B') {
+      this.toggleBookmark();
       e.preventDefault();
     }
   }
@@ -1314,7 +2016,11 @@ export class EpubReaderElement extends HTMLElement {
     update();
     // Vertical scroll (scroll mode) and horizontal scroll (paginated)
     // both fire the same event on the window.
-    const onScroll = () => { update(); this.#schedulePositionSave(); };
+    const onScroll = () => {
+      update();
+      this.#schedulePositionSave();
+      this.#updateBookmarkButton();
+    };
     win.addEventListener('scroll', onScroll, { passive: true });
     doc.body?.addEventListener('scroll', onScroll, { passive: true });
     // After subresources load, layout shifts; recompute once.
@@ -1351,12 +2057,25 @@ export class EpubReaderElement extends HTMLElement {
     e.sReset.addEventListener('click', () => this.resetTypography());
     e.sClose.addEventListener('click', () => this.#toggleSettings(false));
 
-    // Close panel on outside click.
+    // Close popovers on outside click. Both panels are mutually exclusive
+    // (only one open at a time) so we check each independently.
     this.addEventListener('pointerdown', (ev) => {
-      if (e.settingsPanel.hidden) return;
       const path = ev.composedPath();
-      if (path.includes(e.settingsPanel) || path.includes(e.settingsToggle)) return;
-      this.#toggleSettings(false);
+      if (!e.settingsPanel.hidden &&
+          !path.includes(e.settingsPanel) &&
+          !path.includes(e.settingsToggle)) {
+        this.#toggleSettings(false);
+      }
+      if (!e.bookmarksPanel.hidden &&
+          !path.includes(e.bookmarksPanel) &&
+          !path.includes(e.bookmarksToggle)) {
+        this.#toggleBookmarksPanel(false);
+      }
+      if (!e.libraryPanel.hidden &&
+          !path.includes(e.libraryPanel) &&
+          !path.includes(e.libraryToggle)) {
+        this.#toggleLibraryPanel(false);
+      }
     });
   }
 
@@ -1394,6 +2113,18 @@ export class EpubReaderElement extends HTMLElement {
     ov.hidden = false;
   }
   #hideOverlay() { this.#els.overlay.hidden = true; }
+}
+
+/**
+ * Human-readable byte count: 1.6 MB, 184 KB, 12 B, etc.
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function findInToc(items, path) {
