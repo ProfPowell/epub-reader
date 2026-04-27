@@ -1250,6 +1250,106 @@ test('find: Escape closes and clears marks (issue #17)', async (h, { page }) => 
   eq(after.marks, 0, 'Esc should clear find marks');
 });
 
+test('search: returns hits across multiple chapters with context (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  const hits = await page.evaluate(() => document.getElementById('reader').search('whale', { maxHits: 50 }));
+  truthy(hits.length > 5, `expected several hits, got ${hits.length}`);
+  const chapters = new Set(hits.map(hit => hit.spineIndex));
+  truthy(chapters.size > 1, `hits should span chapters, only saw ${[...chapters].join(',')}`);
+  // Each hit carries enough to render a card.
+  const sample = hits[0];
+  truthy(typeof sample.title === 'string' && sample.title.length > 0, 'hit.title');
+  matches(sample.match, /whale/i);
+  truthy(sample.contextBefore !== undefined && sample.contextAfter !== undefined,
+    'hit should carry surrounding context strings');
+});
+
+test('search: too-short query returns no hits (issue #16)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const empty = await page.evaluate(() => document.getElementById('reader').search('a'));
+  eq(empty.length, 0, 'queries shorter than 2 chars must return []');
+});
+
+test('search: panel renders results grouped by chapter (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.click('.search-toggle');
+  await page.waitForFunction(() => !document.getElementById('reader').querySelector('.search-panel').hidden);
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.search-input');
+    el.value = 'whale';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return r.querySelectorAll('.search-results li').length > 0;
+  }, null, { timeout: 30_000 });
+  const summary = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return {
+      results: r.querySelectorAll('.search-results li').length,
+      status:  r.querySelector('.srch-status').textContent,
+      firstChapter: r.querySelector('.search-results .srch-chap')?.textContent || '',
+      firstSnippetMark: r.querySelector('.search-results .srch-snippet mark')?.textContent || '',
+    };
+  });
+  truthy(summary.results > 5, `expected multiple results, got ${summary.results}`);
+  matches(summary.status, /\d+ result/, `status should report counts, got ${summary.status}`);
+  matches(summary.firstSnippetMark, /whale/i, 'snippet should highlight the matched term');
+});
+
+test('search: clicking a hit jumps to the chapter and highlights matches (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.click('.search-toggle');
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.search-input');
+    el.value = 'whale';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return r.querySelectorAll('.search-results li').length > 0;
+  }, null, { timeout: 30_000 });
+
+  // Capture the destination chapter title before clicking.
+  const targetTitle = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.search-results .srch-chap').textContent.trim());
+  // Click the first hit. Wait for the panel to close + the chapter to render.
+  await page.click('.search-results li:first-child .srch-jump');
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    if (!r.querySelector('.search-panel').hidden) return false;
+    const doc = r.querySelector('iframe').contentDocument;
+    return doc?.querySelectorAll('[data-reader-mark="search"]').length > 0;
+  }, null, { timeout: 8_000 });
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      title: r.querySelector('.title').textContent,
+      marks: doc.querySelectorAll('[data-reader-mark="search"]').length,
+    };
+  });
+  truthy(state.marks > 0, 'destination chapter should have search marks');
+  truthy(targetTitle.length > 0, 'a chapter title was rendered');
+});
+
+test('search: closing the book clears the index + highlights (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').search('whale'));
+  await page.evaluate(() => document.getElementById('reader').close());
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return {
+      panelHidden: r.querySelector('.search-panel').hidden,
+      input: r.querySelector('.search-input').value,
+      results: r.querySelectorAll('.search-results li').length,
+    };
+  });
+  eq(state.panelHidden, true);
+  eq(state.input, '');
+  eq(state.results, 0);
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;

@@ -122,6 +122,12 @@ import { findOffsets, plainText, rangeFromOffsets, wrapRange, unwrapAll, offsets
  * @property {HTMLButtonElement}   findPrev
  * @property {HTMLButtonElement}   findNext
  * @property {HTMLButtonElement}   findClose
+ * @property {HTMLButtonElement}   searchToggle
+ * @property {HTMLElement}         searchPanel
+ * @property {HTMLInputElement}    searchInput
+ * @property {HTMLElement}         searchStatus
+ * @property {HTMLOListElement}    searchResults
+ * @property {HTMLButtonElement}   searchClose
  */
 
 /**
@@ -527,6 +533,103 @@ const COMPONENT_CSS = `
   /* Solid star when bookmark exists at current position. */
   :scope([data-bookmark-active]) .bookmarks-toggle::before { content: ''; }
 
+  /* Search panel: full content-area overlay like the library, but
+     denser since each result is short. */
+  .search-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: var(--color-background, #fbfaf7);
+    color: var(--color-text, #1f1f1f);
+    padding: var(--size-m, 1rem);
+    overflow: auto;
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    gap: var(--size-s, 0.75rem);
+  }
+  .search-panel[hidden] { display: none; }
+  .search-panel .srch-header {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.75rem;
+    align-items: center;
+  }
+  .search-panel h3 {
+    margin: 0;
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-muted, #667085);
+  }
+  .search-panel .search-input {
+    inline-size: 100%;
+    font: inherit; color: inherit;
+    background: var(--color-surface, #fff);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+    padding: 0.4rem 0.6rem;
+  }
+  .search-panel .srch-status {
+    color: var(--color-text-muted, #667085);
+    font-size: var(--font-size-2xs, 0.75rem);
+  }
+  .search-panel .search-results {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    display: grid;
+    gap: 0.4rem;
+  }
+  .search-panel .search-results li {
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+    background: var(--color-surface, #fff);
+  }
+  .search-panel .search-results .srch-jump {
+    display: grid;
+    gap: 0.2rem;
+    inline-size: 100%;
+    text-align: start;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    padding: 0.5rem 0.6rem;
+    font: inherit;
+  }
+  .search-panel .search-results .srch-jump:hover {
+    background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 8%, transparent);
+  }
+  .search-panel .search-results .srch-chap {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .search-panel .search-results .srch-snippet {
+    line-height: 1.4;
+    font-size: 0.95em;
+  }
+  .search-panel .search-results .srch-snippet mark {
+    background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 25%, transparent);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+  .search-panel .row {
+    display: flex; justify-content: flex-end; gap: 0.5rem;
+  }
+  .search-panel button.primary {
+    background: var(--color-interactive, #2d6cdf);
+    color: var(--color-interactive-text, white);
+    border: 0;
+    border-radius: var(--radius-s, 0.35rem);
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+    font: inherit;
+  }
+
   /* Find-in-chapter bar (Ctrl/Cmd+F replacement). */
   .find-bar {
     display: flex;
@@ -760,6 +863,7 @@ const TEMPLATE = `
     <div class="reader-control-group">
       <button class="reader-icon-btn font-decrease" type="button" aria-label="Decrease font size">A&minus;</button>
       <button class="reader-icon-btn font-increase" type="button" aria-label="Increase font size">A+</button>
+      <button class="reader-icon-btn search-toggle" type="button" aria-label="Search book" aria-expanded="false" title="Search whole book">&#128269;</button>
       <button class="reader-icon-btn bookmarks-toggle" type="button" aria-label="Bookmarks" aria-expanded="false" aria-pressed="false" title="Bookmarks (b to toggle)">&#9734;</button>
       <button class="reader-icon-btn library-toggle" type="button" aria-label="Library" aria-expanded="false" title="Library">&#128218;</button>
       <button class="reader-icon-btn settings-toggle" type="button" aria-label="Reading settings" aria-expanded="false" title="Reading settings">Aa</button>
@@ -837,6 +941,18 @@ const TEMPLATE = `
       </div>
       <ol class="bm-list" aria-live="polite"></ol>
       <div class="bm-empty">No bookmarks yet — press <kbd>b</kbd> or use the button above.</div>
+    </aside>
+    <aside class="search-panel" role="dialog" aria-label="Search book" hidden>
+      <header class="srch-header">
+        <h3>Search</h3>
+        <input class="search-input" type="search" placeholder="Search the whole book…"
+          aria-label="Search the whole book" autocomplete="off" spellcheck="false" />
+      </header>
+      <div class="srch-status" aria-live="polite"></div>
+      <ol class="search-results" aria-live="polite"></ol>
+      <div class="row">
+        <button type="button" class="search-close primary">Done</button>
+      </div>
     </aside>
     <aside class="library-panel" role="dialog" aria-label="Library" hidden>
       <header class="lib-header">
@@ -924,6 +1040,12 @@ export class EpubReaderElement extends HTMLElement {
       findPrev:           $('.find-prev'),
       findNext:           $('.find-next'),
       findClose:          $('.find-close'),
+      searchToggle:       $('.search-toggle'),
+      searchPanel:        $('.search-panel'),
+      searchInput:        $('.search-input'),
+      searchStatus:       $('.srch-status'),
+      searchResults:      $('.search-results'),
+      searchClose:        $('.search-close'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
@@ -955,6 +1077,17 @@ export class EpubReaderElement extends HTMLElement {
     this.#els.findPrev.addEventListener('click', () => this.#findStep(-1));
     this.#els.findNext.addEventListener('click', () => this.#findStep(+1));
     this.#els.findClose.addEventListener('click', () => this.find(false));
+    // Search-whole-book controls.
+    this.#els.searchToggle.addEventListener('click', () => this.#toggleSearchPanel());
+    this.#els.searchClose.addEventListener('click', () => this.#toggleSearchPanel(false));
+    let searchTimer = 0;
+    this.#els.searchInput.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => this.#runSearch(this.#els.searchInput.value), 200);
+    });
+    this.#els.searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { this.#toggleSearchPanel(false); e.preventDefault(); }
+    });
     this.#els.iframe.addEventListener('load', () => this.#onIframeLoad());
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
     this.#wireSettingsControls();
@@ -1252,6 +1385,241 @@ export class EpubReaderElement extends HTMLElement {
       if (!scrolled) { el.scrollIntoView({ block: 'center' }); scrolled = true; }
     }
     this.#els.findCount.textContent = `${this.#findIndex + 1} / ${this.#findTotal}`;
+  }
+
+  // ------- full-text search (#16) -------
+
+  /**
+   * Lazy index of all reflowable spine items, built on first search.
+   * Cleared on book close so reopening rebuilds. Pre-paginated chapters
+   * are skipped — they're images, not text.
+   *
+   * @typedef {{spineIndex: number, path: string, title: string, text: string, lower: string}} SearchChapter
+   * @type {SearchChapter[] | null}
+   */
+  #searchIndex = null;
+  /** @type {Promise<SearchChapter[]> | null} */
+  #searchIndexPromise = null;
+  /** Current search query — propagated to chapter highlighting on nav. */
+  #searchQuery = '';
+
+  /**
+   * Build (or return cached) full-text index for the open book. The
+   * index pulls each chapter through a fresh fetch + DOMParser so the
+   * text matches what the user actually sees, with whitespace
+   * normalised to single spaces for predictable offsets.
+   *
+   * @returns {Promise<SearchChapter[]>}
+   */
+  #buildSearchIndex() {
+    if (this.#searchIndex) return Promise.resolve(this.#searchIndex);
+    if (this.#searchIndexPromise) return this.#searchIndexPromise;
+    if (!this.#book) return Promise.resolve([]);
+    const book = this.#book;
+    const status = this.#els.searchStatus;
+    /** @type {SearchChapter[]} */
+    const out = [];
+    const total = book.spine.length;
+    this.#searchIndexPromise = (async () => {
+      for (let i = 0; i < book.spine.length; i++) {
+        // Bail if the user closed the book mid-build.
+        if (this.#book !== book) return [];
+        if (status) status.textContent = `Indexing… ${i + 1} / ${total}`;
+        const item = book.spine[i];
+        if (item.layout === 'pre-paginated') continue;
+        try {
+          const url = await book.resourceUrl(item.path);
+          const res = await fetch(url);
+          const html = await res.text();
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const text = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!text) continue;
+          out.push({
+            spineIndex: i,
+            path: item.path,
+            title: this.#tocLabelForPath(item.path) || `Chapter ${i + 1}`,
+            text,
+            lower: text.toLowerCase(),
+          });
+        } catch { /* skip unreadable chapters */ }
+      }
+      this.#searchIndex = out;
+      this.#searchIndexPromise = null;
+      if (status) status.textContent = '';
+      return out;
+    })();
+    return this.#searchIndexPromise;
+  }
+
+  /**
+   * Public search API. Returns hits across the whole book without
+   * touching the panel. Useful for embedders.
+   *
+   * @param {string} query
+   * @param {{ maxHits?: number }} [opts]
+   * @returns {Promise<{spineIndex: number, path: string, title: string,
+   *                    offset: number, contextBefore: string, match: string,
+   *                    contextAfter: string}[]>}
+   */
+  async search(query, opts = {}) {
+    const q = (query || '').trim();
+    if (q.length < 2) return [];
+    const maxHits = opts.maxHits ?? 500;
+    const idx = await this.#buildSearchIndex();
+    const lower = q.toLowerCase();
+    /** @type {{spineIndex:number, path:string, title:string, offset:number,
+     *          contextBefore:string, match:string, contextAfter:string,
+     *          matchOrdinal:number}[]} */
+    const hits = [];
+    for (const ch of idx) {
+      let i = 0;
+      let ordinal = 0;
+      while (i <= ch.lower.length) {
+        const at = ch.lower.indexOf(lower, i);
+        if (at < 0) break;
+        const start = Math.max(0, at - 40);
+        const end = Math.min(ch.text.length, at + lower.length + 40);
+        hits.push({
+          spineIndex: ch.spineIndex,
+          path: ch.path,
+          title: ch.title,
+          offset: at,
+          contextBefore: ch.text.slice(start, at),
+          match: ch.text.slice(at, at + lower.length),
+          contextAfter: ch.text.slice(at + lower.length, end),
+          matchOrdinal: ordinal++,
+        });
+        if (hits.length >= maxHits) return hits;
+        i = at + Math.max(1, lower.length);
+      }
+    }
+    return hits;
+  }
+
+  async #toggleSearchPanel(force) {
+    const open = typeof force === 'boolean' ? force : this.#els.searchPanel.hidden;
+    this.#els.searchPanel.hidden = !open;
+    this.#els.searchToggle.setAttribute('aria-expanded', String(open));
+    if (open) {
+      // Mutually exclusive popovers.
+      this.#els.bookmarksPanel.hidden = true;
+      this.#els.bookmarksToggle.setAttribute('aria-expanded', 'false');
+      this.#els.libraryPanel.hidden = true;
+      this.#els.libraryToggle.setAttribute('aria-expanded', 'false');
+      this.#els.settingsPanel.hidden = true;
+      this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
+      this.#els.searchInput.focus();
+      this.#els.searchInput.select();
+    }
+  }
+
+  async #runSearch(query) {
+    const q = (query || '').trim();
+    this.#searchQuery = q;
+    const ol = this.#els.searchResults;
+    const status = this.#els.searchStatus;
+    ol.innerHTML = '';
+    if (q.length < 2) {
+      status.textContent = q.length === 0 ? '' : 'Type at least 2 characters.';
+      return;
+    }
+    status.textContent = 'Searching…';
+    const hits = await this.search(q);
+    if (this.#searchQuery !== q) return; // superseded
+    if (hits.length === 0) {
+      status.textContent = `No results for “${q}”.`;
+      return;
+    }
+    // Group by chapter for the visual list.
+    /** @type {Map<number, typeof hits>} */
+    const byChap = new Map();
+    for (const h of hits) {
+      const arr = byChap.get(h.spineIndex) || [];
+      arr.push(h);
+      byChap.set(h.spineIndex, arr);
+    }
+    status.textContent = `${hits.length} result${hits.length === 1 ? '' : 's'} in ${byChap.size} chapter${byChap.size === 1 ? '' : 's'}.`;
+    const frag = document.createDocumentFragment();
+    for (const [, group] of byChap) {
+      for (const h of group) {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'srch-jump';
+        const chap = document.createElement('span');
+        chap.className = 'srch-chap';
+        chap.textContent = h.title;
+        const snip = document.createElement('span');
+        snip.className = 'srch-snippet';
+        snip.append(document.createTextNode(h.contextBefore));
+        const m = document.createElement('mark');
+        m.textContent = h.match;
+        snip.append(m);
+        snip.append(document.createTextNode(h.contextAfter));
+        btn.append(chap, snip);
+        btn.addEventListener('click', () => this.#goToSearchHit(h));
+        li.append(btn);
+        frag.append(li);
+      }
+    }
+    ol.append(frag);
+  }
+
+  /**
+   * Jump from a search hit to the corresponding place in the chapter.
+   * After the iframe finishes loading, scroll to the matched offset
+   * and wrap every match for the active query in a search-mark so the
+   * reader sees them all in context.
+   *
+   * @param {{spineIndex: number, matchOrdinal: number}} hit
+   */
+  async #goToSearchHit(hit) {
+    await this.#toggleSearchPanel(false);
+    const settle = () => {
+      const doc = this.#els.iframe.contentDocument;
+      if (!doc?.body) return;
+      this.#highlightSearchInChapter(doc, this.#searchQuery);
+      const marks = /** @type {NodeListOf<HTMLElement>} */ (
+        doc.querySelectorAll('[data-reader-mark="search"]'));
+      if (marks.length === 0) return;
+      // Marks are in document order — pick the user's clicked match
+      // by its per-chapter ordinal.
+      const target = marks[hit.matchOrdinal] || marks[0];
+      target.scrollIntoView({ block: 'center' });
+    };
+    if (this.#currentIndex === hit.spineIndex) {
+      settle();
+      return;
+    }
+    this.goToIndex(hit.spineIndex);
+    this.#els.iframe.addEventListener('load', settle, { once: true });
+  }
+
+  /**
+   * Wrap every match for `query` in the chapter doc with a
+   * `[data-reader-mark="search"]`. Idempotent — clears previous
+   * search marks first.
+   *
+   * @param {Document} doc
+   * @param {string} query
+   */
+  #highlightSearchInChapter(doc, query) {
+    if (!doc.body) return;
+    unwrapAll(doc.body, '[data-reader-mark="search"]');
+    if (!query || query.length < 2) return;
+    const offsets = findOffsets(doc.body, query);
+    let i = 0;
+    for (const { start, end } of offsets) {
+      const range = rangeFromOffsets(doc.body, start, end);
+      if (!range) continue;
+      const idx = i++;
+      wrapRange(range, () => {
+        const m = doc.createElement('mark');
+        m.setAttribute('data-reader-mark', 'search');
+        m.dataset.searchIndex = String(idx);
+        return m;
+      });
+    }
   }
 
   // ------- bookmarks -------
@@ -1669,6 +2037,15 @@ export class EpubReaderElement extends HTMLElement {
     this.#renderBookmarks();
     this.#updateBookmarkButton();
     this.find(false);
+    // Reset full-text search state — index belongs to the closed book.
+    this.#searchIndex = null;
+    this.#searchIndexPromise = null;
+    this.#searchQuery = '';
+    this.#els.searchInput.value = '';
+    this.#els.searchStatus.textContent = '';
+    this.#els.searchResults.innerHTML = '';
+    this.#els.searchPanel.hidden = true;
+    this.#els.searchToggle.setAttribute('aria-expanded', 'false');
     this.#els.iframe.removeAttribute('src');
     this.#els.toc.innerHTML = '';
     this.#els.title.textContent = '';
@@ -1842,6 +2219,10 @@ export class EpubReaderElement extends HTMLElement {
       this.#refreshFind();
     } else {
       this.#findClearMarks(doc);
+    }
+    // Re-apply book-wide search highlights for the active query, if any.
+    if (this.#searchQuery && doc.body) {
+      this.#highlightSearchInChapter(doc, this.#searchQuery);
     }
 
     // Scroll to the requested fragment, if any.
@@ -2312,6 +2693,11 @@ export class EpubReaderElement extends HTMLElement {
           !path.includes(e.libraryPanel) &&
           !path.includes(e.libraryToggle)) {
         this.#toggleLibraryPanel(false);
+      }
+      if (!e.searchPanel.hidden &&
+          !path.includes(e.searchPanel) &&
+          !path.includes(e.searchToggle)) {
+        this.#toggleSearchPanel(false);
       }
     });
   }

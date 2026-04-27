@@ -130,6 +130,20 @@ export interface LibraryEntry {
   lastOpenedAt: number;
 }
 
+/** One full-text search hit. */
+export interface SearchHit {
+  spineIndex: number;
+  path: string;
+  title: string;
+  /** Char offset into the chapter's normalised plain text. */
+  offset: number;
+  contextBefore: string;
+  match: string;
+  contextAfter: string;
+  /** 0-based index of this match within its chapter. */
+  matchOrdinal: number;
+}
+
 /** Detail payload for the `epub-library-change` event. */
 export interface EpubLibraryChangeDetail {
   /** What happened — added, removed, or the whole library was cleared. */
@@ -234,6 +248,20 @@ export class EpubReaderElement extends HTMLElement {
    * don't implement `navigator.storage.estimate()`.
    */
   getStorageEstimate(): Promise<{ usage: number; quota: number; percent: number } | null>;
+
+  /**
+   * Full-text search across the open book. Returns hits with
+   * surrounding context. The first call lazily indexes every
+   * reflowable chapter; later calls are instant. Empty query (or <2
+   * chars) returns `[]`.
+   */
+  search(query: string, opts?: { maxHits?: number }): Promise<SearchHit[]>;
+
+  /** One full-text search hit, suitable for rendering. */
+  // (declared above; here only as a forward reference.)
+
+  /** Open or close the in-chapter find bar. */
+  find(open: boolean): void;
 
   // Theming is delegated to the host page's Vanilla Breeze theme
   // engine. The reader reads `--color-background`, `--color-text`,
