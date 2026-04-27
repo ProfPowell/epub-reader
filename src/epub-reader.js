@@ -1,6 +1,13 @@
 // <epub-reader> custom element. Wraps the EPUB parser in a UI with a
 // sidebar TOC, a toolbar, and an iframe rendering the current spine item.
-// Uses Shadow DOM for style encapsulation so it can be dropped into any page.
+// Renders in light DOM so Vanilla Breeze tokens (--color-surface, --color-text,
+// --color-interactive, etc.) and themes cascade in. Chapter content stays in
+// a sandboxed iframe for publisher-CSS isolation.
+//
+// The chrome borrows Vanilla Breeze's <reader-view> conventions (.reader-chrome,
+// .reader-controls, .reader-control-group, .reader-icon-btn) so the reader
+// blends in on a VB-themed host page even without VB CSS loaded — fallback
+// values on every var() keep it usable bare.
 //
 // Attributes:
 //   src          URL of an EPUB to auto-load.
@@ -37,7 +44,8 @@ import { openEpub } from './epub.js';
  * @property {HTMLIFrameElement}   iframe
  * @property {HTMLDivElement}      overlay
  * @property {HTMLElement}         settingsPanel
- * @property {HTMLSelectElement}   sTheme
+ * @property {HTMLButtonElement}   fontDecrease
+ * @property {HTMLButtonElement}   fontIncrease
  * @property {HTMLSelectElement}   sFontFamily
  * @property {HTMLInputElement}    sFontSize
  * @property {HTMLInputElement}    sLineHeight
@@ -65,107 +73,6 @@ import { openEpub } from './epub.js';
  */
 
 const TYPOGRAPHY_KEY = 'epub-reader:typography';
-const THEME_KEY = 'epub-reader:theme';
-
-/** @type {readonly Theme[]} */
-const THEMES = /** @type {const} */ (['auto', 'light', 'sepia', 'dark', 'high-contrast']);
-
-/**
- * Per-theme baseline tokens used to build chapter-iframe stylesheets. The
- * host shadow CSS holds the same values as `:host([data-theme=...])` rules;
- * we duplicate them here because CSS variables don't pierce iframe boundaries
- * — the chapter CSS has to be self-contained.
- *
- * @type {Record<Exclude<Theme, 'auto'>, ThemeTokens>}
- */
-const THEME_TOKENS = {
-  light: {
-    bg: '#fbfaf7', fg: '#1f1f1f', link: '#2d6cdf',
-    muted: '#667085', border: '#e4e4e7', accent: '#2d6cdf',
-  },
-  sepia: {
-    bg: '#f4ecd8', fg: '#5b4636', link: '#7c421d',
-    muted: '#8a7762', border: '#d8c9a3', accent: '#7c421d',
-  },
-  dark: {
-    bg: '#17181b', fg: '#e9e9ec', link: '#79b1ff',
-    muted: '#9aa0a6', border: '#2a2c31', accent: '#79b1ff',
-  },
-  'high-contrast': {
-    bg: '#000', fg: '#fff', link: '#ffe66d',
-    muted: '#ccc', border: '#fff', accent: '#ffe66d',
-  },
-};
-
-/**
- * @typedef {'auto' | 'light' | 'sepia' | 'dark' | 'high-contrast'} Theme
- *
- * @typedef {object} ThemeTokens
- * @property {string} bg
- * @property {string} fg
- * @property {string} link
- * @property {string} muted
- * @property {string} border
- * @property {string} accent
- */
-
-/** @returns {Theme} */
-function loadTheme() {
-  try {
-    const raw = globalThis.localStorage?.getItem(THEME_KEY);
-    if (raw && THEMES.includes(/** @type {Theme} */ (raw))) return /** @type {Theme} */ (raw);
-  } catch { /* fall through */ }
-  return 'auto';
-}
-
-/** @param {Theme} t */
-function saveTheme(t) {
-  try { globalThis.localStorage?.setItem(THEME_KEY, t); } catch { /* private mode, quota, etc. */ }
-}
-
-/**
- * Build chapter-iframe theme CSS. For 'auto' we emit two blocks gated on
- * `prefers-color-scheme: dark` so the chapter follows OS theme changes
- * without our needing to re-inject. For explicit themes, prefer values
- * read from the host element so user CSS-variable overrides win.
- *
- * @param {Theme} theme
- * @param {Element} host  Used to resolve --reader-theme-* overrides.
- * @returns {string}
- */
-function buildThemeCss(theme, host) {
-  if (theme === 'auto') {
-    return [
-      themeBlock(THEME_TOKENS.light, ''),
-      `@media (prefers-color-scheme: dark) {`,
-      themeBlock(THEME_TOKENS.dark, '  '),
-      `}`,
-    ].join('\n');
-  }
-  const cs = host.ownerDocument?.defaultView?.getComputedStyle(host);
-  const baseline = THEME_TOKENS[theme];
-  /** @param {keyof ThemeTokens} key @param {string} cssVar */
-  const pick = (key, cssVar) => cs?.getPropertyValue(cssVar).trim() || baseline[key];
-  return themeBlock({
-    bg:     pick('bg',     '--reader-theme-bg'),
-    fg:     pick('fg',     '--reader-theme-fg'),
-    link:   pick('link',   '--reader-theme-link'),
-    muted:  pick('muted',  '--reader-theme-muted'),
-    border: pick('border', '--reader-theme-border'),
-    accent: pick('accent', '--reader-theme-accent'),
-  }, '');
-}
-
-/** @param {ThemeTokens} t @param {string} indent */
-function themeBlock(t, indent) {
-  return [
-    `${indent}html, body { background-color: ${t.bg} !important; color: ${t.fg} !important; }`,
-    `${indent}a, a:link { color: ${t.link} !important; }`,
-    `${indent}a:visited { color: color-mix(in srgb, ${t.link} 70%, ${t.fg}) !important; }`,
-    `${indent}hr { border-color: ${t.border} !important; }`,
-    `${indent}::selection { background-color: color-mix(in srgb, ${t.accent} 30%, transparent); }`,
-  ].join('\n');
-}
 
 /** @returns {TypographySettings} */
 function defaultTypography() {
@@ -218,270 +125,242 @@ function buildTypographyCss(/** @type {TypographySettings} */ t) {
   return rules.join('\n');
 }
 
-const TEMPLATE = `
-<style>
-  /* --reader-theme-* are the public theme tokens. Consumers can override
-     them on the host element to define a custom theme. The :host blocks
-     below set them from a preset for each data-theme value. The remaining
-     --reader-* tokens map to them so existing chrome rules pick up the
-     theme automatically. */
-  :host {
-    /* Default ("auto"): track the OS theme via prefers-color-scheme,
-       falling back to vanilla-breeze tokens / spec defaults. */
-    --reader-theme-bg:           var(--vb-color-surface, #fbfaf7);
-    --reader-theme-fg:           var(--vb-color-text,    #1f1f1f);
-    --reader-theme-muted:        var(--vb-color-muted,   #667085);
-    --reader-theme-accent:       var(--vb-color-primary, #2d6cdf);
-    --reader-theme-link:         var(--reader-theme-accent);
-    --reader-theme-link-visited: color-mix(in srgb, var(--reader-theme-link) 70%, var(--reader-theme-fg));
-    --reader-theme-border:       var(--vb-color-border,  #e4e4e7);
 
-    --reader-bg:        var(--reader-theme-bg);
-    --reader-fg:        var(--reader-theme-fg);
-    --reader-muted:     var(--reader-theme-muted);
-    --reader-accent:    var(--reader-theme-accent);
-    --reader-border:    var(--reader-theme-border);
-    --reader-sidebar-w: 18rem;
-    --reader-font:      var(--vb-font-body, system-ui, -apple-system, "Segoe UI", sans-serif);
-    --reader-content-font: var(--reader-font);
 
-    display: block;
-    position: relative;
+// Component CSS, scoped via @scope so it never leaks beyond <epub-reader>.
+// All colours / sizes / radii read Vanilla Breeze tokens with sensible
+// fallbacks, so the component is themable when VB is loaded and usable
+// (if plainer) when it isn't.
+const COMPONENT_CSS = `
+@scope (epub-reader) {
+  :scope {
+    display: grid;
+    grid-template-rows: auto 1fr;
     block-size: 100%;
     min-block-size: 20rem;
-    color: var(--reader-fg);
-    background: var(--reader-bg);
-    font-family: var(--reader-font);
+    background: var(--color-background, #fbfaf7);
+    color: var(--color-text, #1f1f1f);
     container-type: inline-size;
   }
 
-  /* Preset themes. Each one sets the public --reader-theme-* tokens. */
-  :host([data-theme="light"]) {
-    --reader-theme-bg:     #fbfaf7;
-    --reader-theme-fg:     #1f1f1f;
-    --reader-theme-muted:  #667085;
-    --reader-theme-accent: #2d6cdf;
-    --reader-theme-link:   #2d6cdf;
-    --reader-theme-border: #e4e4e7;
-  }
-  :host([data-theme="sepia"]) {
-    --reader-theme-bg:     #f4ecd8;
-    --reader-theme-fg:     #5b4636;
-    --reader-theme-muted:  #8a7762;
-    --reader-theme-accent: #7c421d;
-    --reader-theme-link:   #7c421d;
-    --reader-theme-border: #d8c9a3;
-  }
-  :host([data-theme="dark"]) {
-    --reader-theme-bg:     #17181b;
-    --reader-theme-fg:     #e9e9ec;
-    --reader-theme-muted:  #9aa0a6;
-    --reader-theme-accent: #79b1ff;
-    --reader-theme-link:   #79b1ff;
-    --reader-theme-border: #2a2c31;
-  }
-  :host([data-theme="high-contrast"]) {
-    --reader-theme-bg:     #000;
-    --reader-theme-fg:     #fff;
-    --reader-theme-muted:  #ccc;
-    --reader-theme-accent: #ffe66d;
-    --reader-theme-link:   #ffe66d;
-    --reader-theme-border: #fff;
-  }
-
-  .shell {
+  .reader-chrome {
     display: grid;
-    grid-template-columns: var(--reader-sidebar-w) 1fr;
-    grid-template-rows: auto 1fr;
-    block-size: 100%;
-    min-block-size: inherit;
-  }
-  :host([hide-toc]) .shell,
-  .shell.toc-hidden { grid-template-columns: 0 1fr; }
-  :host([hide-toc]) .sidebar,
-  .shell.toc-hidden .sidebar { display: none; }
-
-  .toolbar {
-    grid-column: 1 / -1;
-    display: flex;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    gap: .5rem;
-    padding: .5rem .75rem;
-    border-block-end: 1px solid var(--reader-border);
-    background: var(--reader-bg);
-    position: sticky;
-    inset-block-start: 0;
+    gap: var(--size-m, 1rem);
+    padding-inline: max(var(--size-m, 1rem), env(safe-area-inset-left))
+                    max(var(--size-m, 1rem), env(safe-area-inset-right));
+    block-size: var(--_reader-chrome-h, 3.625rem);
+    background: var(--color-surface, #f5f5f5);
+    border-block-end: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    position: relative;
     z-index: 2;
   }
-  .toolbar .title {
-    flex: 1;
-    min-inline-size: 0;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .reader-chrome-copy { min-inline-size: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+  .reader-chrome-kicker {
+    font-size: var(--font-size-2xs, 0.625rem);
+    font-weight: var(--font-weight-semibold, 600);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-text-muted, #888);
   }
-  .toolbar .progress {
-    color: var(--reader-muted);
-    font-variant-numeric: tabular-nums;
-    font-size: .9em;
+  .reader-chrome-title {
+    font-size: var(--font-size-xs, 0.75rem);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted, #888);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  button {
-    font: inherit;
-    color: inherit;
+  .reader-controls {
+    display: flex; align-items: center;
+    gap: var(--size-s, 0.75rem);
+    min-inline-size: 0; overflow-x: auto; scrollbar-width: none;
+  }
+  .reader-controls::-webkit-scrollbar { display: none; }
+  .reader-control-group {
+    display: inline-flex; align-items: center;
+    gap: var(--size-3xs, 0.125rem);
+    padding: var(--size-3xs, 0.125rem);
+    background: var(--color-surface-raised, rgba(0, 0, 0, 0.04));
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-full, 999px);
+    flex: 0 0 auto;
+  }
+  .reader-icon-btn, .reader-seg-btn {
+    border: 0;
     background: transparent;
-    border: 1px solid var(--reader-border);
-    border-radius: .375rem;
-    padding: .35rem .6rem;
+    color: var(--color-text-muted, #667085);
     cursor: pointer;
+    border-radius: var(--radius-full, 999px);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-weight: var(--font-weight-semibold, 600);
+    transition: color 140ms ease, background 140ms ease;
   }
-  button:hover:not(:disabled) { background: color-mix(in srgb, var(--reader-accent) 8%, transparent); }
-  button:disabled { opacity: .4; cursor: not-allowed; }
-  button.primary { background: var(--reader-accent); color: white; border-color: transparent; }
-  button.icon { padding: .35rem .5rem; }
+  .reader-icon-btn {
+    inline-size: 2.1rem; block-size: 2.1rem;
+    display: inline-grid; place-items: center;
+    font-size: var(--font-size-xs, 0.75rem);
+  }
+  .reader-icon-btn:hover:not(:disabled),
+  .reader-seg-btn:hover:not(:disabled) {
+    color: var(--color-text, #222);
+    background: var(--color-surface-raised, rgba(0, 0, 0, 0.06));
+  }
+  .reader-icon-btn:disabled, .reader-seg-btn:disabled { opacity: .28; cursor: default; }
+  .reader-icon-btn[aria-pressed="true"], .reader-seg-btn[data-reader-state="active"] {
+    color: var(--color-interactive-text, #fff);
+    background: var(--color-interactive, #2d6cdf);
+  }
+  .progress {
+    color: var(--color-text-muted, #667085);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--font-size-2xs, 0.7rem);
+    padding-inline: var(--size-2xs, 0.35rem);
+    min-inline-size: 3rem;
+    text-align: center;
+  }
+  .title { /* alias for the chrome title; kept for tests/CSS hooks */ }
+
+  .body {
+    display: grid;
+    grid-template-columns: var(--_sidebar-w, 18rem) 1fr;
+    min-block-size: 0;
+    overflow: hidden;
+  }
+  :scope([hide-toc]) .body, .body.toc-hidden { grid-template-columns: 0 1fr; }
+  :scope([hide-toc]) .sidebar, .body.toc-hidden .sidebar { display: none; }
 
   .sidebar {
     overflow: auto;
-    border-inline-end: 1px solid var(--reader-border);
-    padding: .5rem;
-    background: var(--reader-bg);
+    border-inline-end: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    padding: var(--size-2xs, 0.5rem);
+    background: var(--color-surface, #fbfaf7);
   }
   .sidebar h2 {
-    font-size: .75rem;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--reader-muted);
-    margin: .25rem .25rem .5rem;
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--color-text-muted, #667085);
+    margin: 0.25rem 0.25rem 0.5rem;
   }
   .toc, .toc ol { list-style: none; margin: 0; padding: 0; }
-  .toc ol { padding-inline-start: .75rem; border-inline-start: 1px solid var(--reader-border); margin-block: .25rem; }
-  .toc li { margin: 0; }
+  .toc ol { padding-inline-start: 0.75rem; border-inline-start: 1px solid var(--color-border, #e4e4e7); margin-block: 0.25rem; }
   .toc a {
-    display: block;
-    padding: .3rem .5rem;
-    border-radius: .25rem;
-    color: inherit;
-    text-decoration: none;
-    line-height: 1.3;
-    font-size: .9rem;
+    display: block; padding: 0.3rem 0.5rem; border-radius: 0.25rem;
+    color: inherit; text-decoration: none; line-height: 1.3;
+    font-size: var(--font-size-s, 0.9rem);
   }
-  .toc a:hover { background: color-mix(in srgb, var(--reader-accent) 10%, transparent); }
-  .toc a.current { background: color-mix(in srgb, var(--reader-accent) 16%, transparent); font-weight: 600; }
+  .toc a:hover { background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 10%, transparent); }
+  .toc a.current { background: color-mix(in srgb, var(--color-interactive, #2d6cdf) 16%, transparent); font-weight: 600; }
 
-  .content { position: relative; overflow: hidden; background: var(--reader-bg); }
+  .content { position: relative; overflow: hidden; background: var(--color-background, #fff); }
   iframe {
-    inline-size: 100%;
-    block-size: 100%;
-    border: 0;
-    display: block;
-    background: var(--reader-theme-bg);
+    inline-size: 100%; block-size: 100%; border: 0; display: block;
+    background: var(--color-background, #fff);
   }
 
   .overlay {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: 2rem;
-    text-align: center;
-    color: var(--reader-muted);
-    pointer-events: none;
+    position: absolute; inset: 0; display: grid; place-items: center;
+    padding: 2rem; text-align: center; pointer-events: none;
+    color: var(--color-text-muted, #667085);
   }
   .overlay[hidden] { display: none; }
   .overlay .message { max-inline-size: 32rem; }
-  .overlay.error { color: #b42318; }
+  .overlay.error { color: var(--color-danger, #b42318); }
 
-  /* Typography settings panel */
   .settings-panel {
     position: absolute;
-    inset-block-start: calc(100% + .25rem);
-    inset-inline-end: .5rem;
+    inset-block-start: calc(100% + 0.25rem);
+    inset-inline-end: var(--size-s, 0.75rem);
     z-index: 4;
     inline-size: min(20rem, calc(100vw - 1rem));
-    background: var(--reader-bg);
-    color: var(--reader-fg);
-    border: 1px solid var(--reader-border);
-    border-radius: .5rem;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
-    padding: .75rem;
-    display: grid;
-    gap: .6rem;
-    font-size: .9rem;
+    background: var(--color-surface, #fbfaf7);
+    color: var(--color-text, #1f1f1f);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-m, 0.5rem);
+    box-shadow: var(--shadow-l, 0 8px 24px rgba(0,0,0,0.12));
+    padding: 0.75rem;
+    display: grid; gap: 0.6rem;
+    font-size: var(--font-size-s, 0.9rem);
   }
   .settings-panel[hidden] { display: none; }
   .settings-panel h3 {
-    font-size: .75rem;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--reader-muted);
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--color-text-muted, #667085);
     margin: 0;
   }
   .settings-panel label {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: .25rem .75rem;
-    align-items: center;
+    display: grid; grid-template-columns: 1fr auto; gap: 0.25rem 0.75rem; align-items: center;
   }
   .settings-panel label .value {
-    color: var(--reader-muted);
+    color: var(--color-text-muted, #667085);
     font-variant-numeric: tabular-nums;
-    font-size: .85em;
+    font-size: 0.85em;
   }
   .settings-panel select,
   .settings-panel input[type="range"] {
     grid-column: 1 / -1;
     inline-size: 100%;
-    font: inherit;
-    color: inherit;
-    background: transparent;
-    border: 1px solid var(--reader-border);
-    border-radius: .25rem;
-    padding: .25rem .35rem;
+    font: inherit; color: inherit; background: transparent;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+    padding: 0.25rem 0.35rem;
   }
   .settings-panel input[type="range"] { padding: 0; }
-  .settings-panel .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .5rem;
+  .settings-panel .row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .settings-panel .row.checkbox label { grid-template-columns: auto 1fr; gap: 0.5rem; }
+  .settings-panel button {
+    font: inherit; color: inherit;
+    background: transparent;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.35rem);
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
   }
-  .settings-panel .row.checkbox label {
-    grid-template-columns: auto 1fr;
-    gap: .5rem;
+  .settings-panel button.primary {
+    background: var(--color-interactive, #2d6cdf);
+    color: var(--color-interactive-text, white);
+    border-color: transparent;
   }
 
   @container (inline-size < 40rem) {
-    .shell { grid-template-columns: 1fr; }
-    .sidebar { display: none; position: absolute; inset: 3rem 0 0 0; z-index: 1; inline-size: min(20rem, 90%); box-shadow: 0 4px 16px rgba(0,0,0,.1); }
-    .shell.toc-open .sidebar { display: block; }
+    .body { grid-template-columns: 1fr; }
+    .sidebar { display: none; position: absolute; inset: 3.625rem 0 0 0; z-index: 1;
+               inline-size: min(20rem, 90%); box-shadow: 0 4px 16px rgba(0,0,0,.1); }
+    .body.toc-open .sidebar { display: block; }
   }
-</style>
-<div class="shell" part="shell">
-  <div class="toolbar" part="toolbar">
-    <button class="icon toc-toggle" type="button" aria-label="Toggle table of contents" title="Table of contents">&#9776;</button>
-    <span class="title" part="title"></span>
-    <span class="progress" part="progress"></span>
-    <button class="icon settings-toggle" type="button" aria-label="Reading settings" aria-expanded="false" title="Reading settings">Aa</button>
-    <button class="prev" type="button" aria-label="Previous chapter">&larr;</button>
-    <button class="next" type="button" aria-label="Next chapter">&rarr;</button>
+}`;
+
+// Light-DOM markup. Borrows class names from <reader-view> chrome
+// (.reader-chrome, .reader-controls, .reader-control-group, .reader-icon-btn)
+// so VB stylesheets — when loaded — paint the reader natively.
+const TEMPLATE = `
+<header class="reader-chrome">
+  <div class="reader-chrome-copy">
+    <span class="reader-chrome-kicker">EPUB</span>
+    <span class="reader-chrome-title title"></span>
   </div>
-  <aside class="sidebar" part="sidebar">
-    <h2>Contents</h2>
-    <ol class="toc" part="toc"></ol>
-  </aside>
-  <div class="content" part="content">
-    <aside class="settings-panel" part="settings" role="dialog" aria-label="Reading settings" hidden>
+  <div class="reader-controls" role="toolbar" aria-label="Reading controls">
+    <div class="reader-control-group">
+      <button class="reader-icon-btn toc-toggle" type="button" aria-label="Toggle table of contents" title="Table of contents">&#9776;</button>
+    </div>
+    <div class="reader-control-group">
+      <button class="reader-icon-btn prev" type="button" aria-label="Previous chapter">&larr;</button>
+      <span class="progress" role="status"></span>
+      <button class="reader-icon-btn next" type="button" aria-label="Next chapter">&rarr;</button>
+    </div>
+    <div class="reader-control-group">
+      <button class="reader-icon-btn font-decrease" type="button" aria-label="Decrease font size">A&minus;</button>
+      <button class="reader-icon-btn font-increase" type="button" aria-label="Increase font size">A+</button>
+      <button class="reader-icon-btn settings-toggle" type="button" aria-label="Reading settings" aria-expanded="false" title="Reading settings">Aa</button>
+    </div>
+  </div>
+</header>
+<div class="body">
+  <aside class="sidebar"><h2>Contents</h2><ol class="toc"></ol></aside>
+  <div class="content">
+    <aside class="settings-panel" role="dialog" aria-label="Reading settings" hidden>
       <h3>Reading settings</h3>
-      <label>
-        <span>Theme</span>
-        <select class="s-theme">
-          <option value="auto">Auto (follow system)</option>
-          <option value="light">Light</option>
-          <option value="sepia">Sepia</option>
-          <option value="dark">Dark</option>
-          <option value="high-contrast">High contrast</option>
-        </select>
-      </label>
       <label>
         <span>Font</span>
         <select class="s-font-family">
@@ -509,56 +388,54 @@ const TEMPLATE = `
         <input class="s-paragraph-spacing" type="range" min="-1" max="20" step="1" />
       </label>
       <div class="row checkbox">
-        <label>
-          <input class="s-justify" type="checkbox" />
-          <span>Justify text</span>
-        </label>
+        <label><input class="s-justify" type="checkbox" /><span>Justify text</span></label>
       </div>
       <div class="row">
         <button type="button" class="s-reset">Reset</button>
         <button type="button" class="s-close primary">Done</button>
       </div>
     </aside>
-    <iframe part="iframe" sandbox="allow-same-origin" title="EPUB content"></iframe>
-    <div class="overlay" part="overlay">
+    <iframe sandbox="allow-same-origin" title="EPUB content"></iframe>
+    <div class="overlay">
       <div class="message">Drop an EPUB file here or choose one to begin.</div>
     </div>
   </div>
 </div>
 `;
 
+
+
 export class EpubReaderElement extends HTMLElement {
   static get observedAttributes() { return ['src', 'start', 'hide-toc']; }
 
-  /** @type {ShadowRoot} */          #shadow;
-  /** @type {ReaderElements} */      #els;
-  /** @type {EpubBook | null} */     #book = null;
-  /** @type {TypographySettings} */  #typography = loadTypography();
-  /** @type {Theme} */               #theme = loadTheme();
+  /** @type {ReaderElements} */     #els;
+  /** @type {EpubBook | null} */    #book = null;
+  /** @type {TypographySettings} */ #typography = loadTypography();
   #currentIndex = -1;
   #loadToken = 0;
 
   constructor() {
     super();
-    this.#shadow = this.attachShadow({ mode: 'open' });
-    this.#shadow.innerHTML = TEMPLATE;
+    EpubReaderElement.#injectStylesOnce();
+    this.innerHTML = TEMPLATE;
     const $ = /** @type {<T extends Element>(sel: string) => T} */ (
-      (sel) => /** @type {any} */ (this.#shadow.querySelector(sel))
+      (sel) => /** @type {any} */ (this.querySelector(sel))
     );
     this.#els = {
-      shell:              $('.shell'),
+      shell:              this,
       title:              $('.title'),
       progress:           $('.progress'),
       prev:               $('.prev'),
       next:               $('.next'),
       toggle:             $('.toc-toggle'),
       settingsToggle:     $('.settings-toggle'),
+      fontDecrease:       $('.font-decrease'),
+      fontIncrease:       $('.font-increase'),
       sidebar:            $('.sidebar'),
       toc:                $('.toc'),
       iframe:             $('iframe'),
       overlay:            $('.overlay'),
       settingsPanel:      $('.settings-panel'),
-      sTheme:             $('.s-theme'),
       sFontFamily:        $('.s-font-family'),
       sFontSize:          $('.s-font-size'),
       sLineHeight:        $('.s-line-height'),
@@ -574,12 +451,26 @@ export class EpubReaderElement extends HTMLElement {
     this.#els.next.addEventListener('click', () => this.next());
     this.#els.toggle.addEventListener('click', () => this.#toggleToc());
     this.#els.settingsToggle.addEventListener('click', () => this.#toggleSettings());
+    this.#els.fontDecrease.addEventListener('click', () => this.#stepFontSize(-10));
+    this.#els.fontIncrease.addEventListener('click', () => this.#stepFontSize(+10));
     this.#els.iframe.addEventListener('load', () => this.#onIframeLoad());
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
     this.#wireSettingsControls();
     this.#syncSettingsControls();
-    this.#applyThemeToHost();
     this.tabIndex = 0;
+  }
+
+  // Component CSS injected once into <head>, scoped via @scope
+  // (epub-reader) so it never leaks. Avoids duplicate <style> blocks
+  // when a page hosts multiple readers.
+  static #stylesInjected = false;
+  static #injectStylesOnce() {
+    if (EpubReaderElement.#stylesInjected) return;
+    EpubReaderElement.#stylesInjected = true;
+    const style = document.createElement('style');
+    style.id = '__epub_reader_component_css';
+    style.textContent = COMPONENT_CSS;
+    document.head.append(style);
   }
 
   connectedCallback() {
@@ -766,8 +657,9 @@ export class EpubReaderElement extends HTMLElement {
     const doc = iframe.contentDocument;
     if (!doc) return;
 
-    // Apply theme + typography overrides before paint to avoid a visible reflow.
-    this.#applyThemeTo(doc);
+    // Apply chapter theming (VB tokens) + typography overrides before
+    // paint to avoid a visible reflow.
+    this.#applyChapterThemingTo(doc);
     this.#applyTypographyTo(doc);
 
     // Intercept in-book navigation via [data-epub-href] (set by epub.js).
@@ -852,44 +744,25 @@ export class EpubReaderElement extends HTMLElement {
   /** Reset typography overrides to publisher defaults. */
   resetTypography() { this.typography = defaultTypography(); }
 
-  // ------- theme -------
-
-  /** @returns {Theme} */
-  get theme() { return this.#theme; }
-
-  /**
-   * @param {Theme} value  One of `auto | light | sepia | dark | high-contrast`.
-   *                       Unknown values fall back to `auto`.
-   */
-  set theme(value) {
-    const next = THEMES.includes(value) ? value : 'auto';
-    if (next === this.#theme) return;
-    this.#theme = next;
-    saveTheme(next);
-    this.#applyThemeToHost();
-    this.#syncSettingsControls();
-    const doc = this.#els.iframe.contentDocument;
-    if (doc) this.#applyThemeTo(doc);
-    this.dispatchEvent(new CustomEvent('epub-theme-change', {
-      detail: { theme: next },
-      bubbles: true, composed: true,
-    }));
+  /** Adjust font size by `delta` percent, clamped to the slider range. */
+  #stepFontSize(delta) {
+    const next = Math.min(200, Math.max(80, this.#typography.fontSize + delta));
+    if (next !== this.#typography.fontSize) this.typography = { fontSize: next };
   }
 
-  /** @returns {readonly Theme[]} */
-  get availableThemes() { return THEMES; }
-
-  /** Set the host's `data-theme` attribute for the shadow CSS to pick up. */
-  #applyThemeToHost() {
-    if (this.#theme === 'auto') this.removeAttribute('data-theme');
-    else this.setAttribute('data-theme', this.#theme);
-  }
+  // ------- chapter theming -------
 
   /**
-   * Inject (or update) the theme override <style> in a chapter doc.
+   * Inject (or update) a tiny stylesheet in the chapter doc that pulls
+   * Vanilla Breeze tokens off the host's computed style and applies them
+   * to the chapter body. This keeps EPUB content visually coherent with
+   * whatever VB theme the host page has active — no reader-side theme
+   * preset list, no theme picker, no localStorage. The host page owns
+   * theming via VB's own theme switcher.
+   *
    * @param {Document} doc
    */
-  #applyThemeTo(doc) {
+  #applyChapterThemingTo(doc) {
     if (doc.documentElement?.localName === 'svg') return;
     const head = doc.head || doc.documentElement;
     if (!head) return;
@@ -898,12 +771,21 @@ export class EpubReaderElement extends HTMLElement {
     if (!style) {
       style = doc.createElement('style');
       style.id = id;
-      // Insert before any other styles so publisher CSS can still override
-      // selectors that don't use !important; we rely on !important only for
-      // the body bg/fg and link colours, which always need to win.
       head.insertBefore(style, head.firstChild);
     }
-    style.textContent = buildThemeCss(this.#theme, this);
+    const cs = this.ownerDocument?.defaultView?.getComputedStyle(this);
+    const pick = (/** @type {string} */ name, /** @type {string} */ fallback) =>
+      cs?.getPropertyValue(name).trim() || fallback;
+    const bg     = pick('--color-background',  '#ffffff');
+    const fg     = pick('--color-text',        '#1f1f1f');
+    const link   = pick('--color-interactive', '#2d6cdf');
+    const border = pick('--color-border',      '#e4e4e7');
+    style.textContent = [
+      `html, body { background-color: ${bg} !important; color: ${fg} !important; }`,
+      `a, a:link { color: ${link} !important; }`,
+      `a:visited { color: color-mix(in srgb, ${link} 70%, ${fg}) !important; }`,
+      `hr { border-color: ${border} !important; }`,
+    ].join('\n');
   }
 
   #toggleSettings(force) {
@@ -917,9 +799,6 @@ export class EpubReaderElement extends HTMLElement {
     const e = this.#els;
     /** @param {Partial<TypographySettings>} patch */
     const update = (patch) => { this.typography = patch; };
-    e.sTheme.addEventListener('change', () => {
-      this.theme = /** @type {Theme} */ (e.sTheme.value);
-    });
     e.sFontFamily.addEventListener('change', () => update({ fontFamily: e.sFontFamily.value }));
     e.sFontSize.addEventListener('input', () => update({ fontSize: Number(e.sFontSize.value) }));
     e.sLineHeight.addEventListener('input', () => {
@@ -948,7 +827,6 @@ export class EpubReaderElement extends HTMLElement {
     const e = this.#els;
     if (!e?.sFontFamily) return;
     const t = this.#typography;
-    e.sTheme.value = this.#theme;
     e.sFontFamily.value = t.fontFamily;
     e.sFontSize.value = String(t.fontSize);
     e.sFontSizeV.textContent = `${t.fontSize}%`;

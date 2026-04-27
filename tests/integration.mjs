@@ -42,13 +42,13 @@ const helpers = (page, server) => ({
     await page.setInputFiles('#file', join(SAMPLES, file));
     await page.waitForFunction(() => {
       const r = document.getElementById('reader');
-      const t = r?.shadowRoot?.querySelector('.title')?.textContent;
-      const ov = r?.shadowRoot?.querySelector('.overlay');
+      const t = r?.querySelector('.title')?.textContent;
+      const ov = r?.querySelector('.overlay');
       const errMode = ov && !ov.hidden && ov.classList.contains('error');
       return errMode || (t && t.length > 0);
     }, null, { timeout: 15_000 });
     await page.waitForFunction(() => {
-      const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+      const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
       if (!doc) return false;
       if (doc.body && doc.body.children.length > 0) return true;
       return doc.documentElement?.localName === 'svg';
@@ -57,7 +57,7 @@ const helpers = (page, server) => ({
 
   state: () => page.evaluate(() => {
     const r = document.getElementById('reader');
-    const s = r.shadowRoot;
+    const s = r;
     return {
       title:    s.querySelector('.title')?.textContent || '',
       progress: s.querySelector('.progress')?.textContent || '',
@@ -66,7 +66,7 @@ const helpers = (page, server) => ({
   }),
 
   iframeContent: () => page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
     if (!doc) return null;
     return {
       bodyText:    (doc.body?.textContent || '').trim().slice(0, 200),
@@ -87,7 +87,7 @@ const helpers = (page, server) => ({
 
   waitChapter: (predicate) => page.waitForFunction((src) => {
     const fn = new Function('doc', 'iframe', 'return (' + src + ')(doc, iframe);');
-    const iframe = document.getElementById('reader').shadowRoot.querySelector('iframe');
+    const iframe = document.getElementById('reader').querySelector('iframe');
     const doc = iframe.contentDocument;
     return doc && fn(doc, iframe);
   }, predicate.toString(), { timeout: 10_000 }),
@@ -137,7 +137,7 @@ test('TOC click jumps to the right spine item', async (h, { page }) => {
   await h.openSample('moby-dick.epub');
   // Pick a TOC entry mid-book and click it via the shadow DOM.
   const target = await page.evaluate(() => {
-    const toc = document.getElementById('reader').shadowRoot.querySelectorAll('.toc a');
+    const toc = document.getElementById('reader').querySelectorAll('.toc a');
     // Find an entry that points to a chapter (not just a heading).
     const hit = [...toc].find(a => a.dataset.path && /chapter_005/i.test(a.dataset.path)) || toc[20];
     hit.click();
@@ -156,7 +156,7 @@ test('internal anchor click navigates between spine items', async (h, { page }) 
   let attempts = 0;
   while (attempts++ < 6) {
     const anchors = await page.evaluate(() => {
-      const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+      const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
       return [...doc.querySelectorAll('[data-epub-href]')].length;
     });
     if (anchors > 0) break;
@@ -165,7 +165,7 @@ test('internal anchor click navigates between spine items', async (h, { page }) 
   }
   const before = await h.state();
   const anchorInfo = await page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
     const a = doc.querySelector('[data-epub-href]');
     const href = a.getAttribute('data-epub-href');
     a.click();
@@ -174,7 +174,7 @@ test('internal anchor click navigates between spine items', async (h, { page }) 
   truthy(anchorInfo.href, 'should have found at least one in-book link');
   await page.waitForFunction((startProgress) => {
     const r = document.getElementById('reader');
-    const p = r.shadowRoot.querySelector('.progress')?.textContent;
+    const p = r.querySelector('.progress')?.textContent;
     return p && p !== startProgress;
   }, before.progress, { timeout: 5_000 });
   // Progress updated synchronously, but the iframe load + render may not
@@ -263,7 +263,7 @@ test('typography: assigning settings injects a style block in the chapter', asyn
     };
   });
   const computed = await page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
     const style = doc.getElementById('__epub_reader_typography');
     const cs = doc.defaultView.getComputedStyle(doc.body);
     const p = doc.querySelector('p');
@@ -290,7 +290,7 @@ test('typography: reset clears the override style', async (h, { page }) => {
     r.resetTypography();
   });
   const cssText = await page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
     const style = doc.getElementById('__epub_reader_typography');
     return style?.textContent || '';
   });
@@ -307,7 +307,7 @@ test('typography: settings persist across reloads and apply to next book', async
   await page.setInputFiles('#file', join(SAMPLES, 'trees.epub'));
   await page.waitForFunction(() => {
     const r = document.getElementById('reader');
-    return r?.shadowRoot?.querySelector('.title')?.textContent;
+    return r?.querySelector('.title')?.textContent;
   });
   await h.waitChapter((doc) => doc.body?.children?.length > 0);
   const settings = await page.evaluate(() => document.getElementById('reader').typography);
@@ -320,101 +320,71 @@ test('typography: settings persist across reloads and apply to next book', async
 test('typography: panel toggle button shows/hides the settings panel', async (h, { page }) => {
   await h.openSample('trees.epub');
   const initiallyOpen = await page.evaluate(() => {
-    const p = document.getElementById('reader').shadowRoot.querySelector('.settings-panel');
+    const p = document.getElementById('reader').querySelector('.settings-panel');
     return !p.hidden;
   });
   eq(initiallyOpen, false, 'panel should start hidden');
   await page.evaluate(() => {
-    document.getElementById('reader').shadowRoot.querySelector('.settings-toggle').click();
+    document.getElementById('reader').querySelector('.settings-toggle').click();
   });
   const opened = await page.evaluate(() => {
-    const p = document.getElementById('reader').shadowRoot.querySelector('.settings-panel');
+    const p = document.getElementById('reader').querySelector('.settings-panel');
     return !p.hidden;
   });
   eq(opened, true, 'clicking settings-toggle should open the panel');
 });
 
-test('theme: setting a theme applies to host attribute and chapter body', async (h, { page }) => {
-  await h.openSample('wasteland.epub');
-  await page.evaluate(() => { document.getElementById('reader').theme = 'dark'; });
-  const state = await page.evaluate(() => {
+
+test('light DOM: chrome is a child of the host element, no shadow root', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const layout = await page.evaluate(() => {
     const r = document.getElementById('reader');
-    const doc = r.shadowRoot.querySelector('iframe').contentDocument;
-    const cs = doc.defaultView.getComputedStyle(doc.body);
     return {
-      hostAttr:   r.getAttribute('data-theme'),
-      themeProp:  r.theme,
-      hasStyle:   !!doc.getElementById('__epub_reader_theme'),
-      bgColor:    cs.backgroundColor,
-      fgColor:    cs.color,
+      hasShadow: !!r.shadowRoot,
+      chrome: !!r.querySelector('.reader-chrome'),
+      controlGroups: r.querySelectorAll('.reader-control-group').length,
+      iconBtns: r.querySelectorAll('.reader-icon-btn').length,
     };
   });
-  eq(state.hostAttr, 'dark', 'host data-theme should be set');
-  eq(state.themeProp, 'dark');
-  truthy(state.hasStyle, 'theme style element should be present');
-  // The dark preset bg is #17181b → rgb(23, 24, 27); fg #e9e9ec → rgb(233, 233, 236).
-  matches(state.bgColor, /rgb\(23, ?24, ?27\)/, `bg should be dark, got ${state.bgColor}`);
-  matches(state.fgColor, /rgb\(233, ?233, ?236\)/, `fg should be light, got ${state.fgColor}`);
+  eq(layout.hasShadow, false, 'no shadow root after refactor');
+  truthy(layout.chrome, '.reader-chrome should be in the host element');
+  truthy(layout.controlGroups >= 3, 'at least 3 reader-control-group');
+  truthy(layout.iconBtns >= 5, 'at least 5 reader-icon-btn (toc, prev, next, A-, A+, settings)');
 });
 
-test('theme: chapter link colour matches the preset', async (h, { page }) => {
+test('VB tokens: chapter iframe picks up colours set on the host', async (h, { page }) => {
   await h.openSample('wasteland.epub');
-  await page.evaluate(() => { document.getElementById('reader').theme = 'sepia'; });
-  const colour = await page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
-    let a = doc.querySelector('a');
-    if (!a) {
-      a = doc.createElement('a'); a.href = '#'; a.textContent = 'x';
-      doc.body.append(a);
-    }
-    return doc.defaultView.getComputedStyle(a).color;
-  });
-  // Sepia link #7c421d → rgb(124, 66, 29).
-  matches(colour, /rgb\(124, ?66, ?29\)/, `sepia link should match preset, got ${colour}`);
-});
-
-test('theme: auto emits prefers-color-scheme media query', async (h, { page }) => {
-  await h.openSample('wasteland.epub');
-  await page.evaluate(() => { document.getElementById('reader').theme = 'auto'; });
-  const css = await page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
-    return doc.getElementById('__epub_reader_theme')?.textContent || '';
-  });
-  matches(css, /@media \(prefers-color-scheme: dark\)/, 'auto theme should emit @media block');
-  // Both tokens should appear (light branch + dark branch).
-  truthy(css.includes('#fbfaf7'), 'should contain light bg');
-  truthy(css.includes('#17181b'), 'should contain dark bg');
-});
-
-test('theme: setting persists across reload', async (h, { page }) => {
-  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
-  await page.evaluate(() => { document.getElementById('reader').theme = 'sepia'; });
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  const restored = await page.evaluate(() => {
-    const r = document.getElementById('reader');
-    return { theme: r.theme, hostAttr: r.getAttribute('data-theme') };
-  });
-  eq(restored.theme, 'sepia');
-  eq(restored.hostAttr, 'sepia');
-  // Reset for subsequent runs.
-  await page.evaluate(() => { document.getElementById('reader').theme = 'auto'; });
-});
-
-test('theme: custom CSS variable on host overrides preset bg', async (h, { page }) => {
-  await h.openSample('wasteland.epub');
-  // Override --reader-theme-bg on the host, then activate a theme. The
-  // chapter CSS reads the resolved value from the host.
+  // Override --color-background and --color-text on the host as VB themes do.
   await page.evaluate(() => {
     const r = document.getElementById('reader');
-    r.style.setProperty('--reader-theme-bg', '#102030');
-    r.theme = 'light';
+    r.style.setProperty('--color-background', '#102030');
+    r.style.setProperty('--color-text', '#cce0ff');
+    // Force chapter theming refresh by re-navigating to the same chapter.
+    r.goToIndex(0);
   });
-  const bg = await page.evaluate(() => {
-    const doc = document.getElementById('reader').shadowRoot.querySelector('iframe').contentDocument;
-    return doc.defaultView.getComputedStyle(doc.body).backgroundColor;
+  await h.waitChapter((doc) =>
+    doc.body && doc.body.children.length > 0 && doc.getElementById('__epub_reader_theme'));
+  const computed = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    const cs = doc.defaultView.getComputedStyle(doc.body);
+    return { bg: cs.backgroundColor, fg: cs.color };
   });
-  // #102030 → rgb(16, 32, 48)
-  matches(bg, /rgb\(16, ?32, ?48\)/, `custom bg override should win, got ${bg}`);
+  matches(computed.bg, /rgb\(16, ?32, ?48\)/, `chapter bg should follow --color-background, got ${computed.bg}`);
+  matches(computed.fg, /rgb\(204, ?224, ?255\)/, `chapter fg should follow --color-text, got ${computed.fg}`);
+});
+
+test('font A-/A+ buttons step the typography fontSize', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.evaluate(() => document.getElementById('reader').resetTypography());
+  const before = await page.evaluate(() => document.getElementById('reader').typography.fontSize);
+  await page.click('.font-increase');
+  await page.click('.font-increase');
+  const after = await page.evaluate(() => document.getElementById('reader').typography.fontSize);
+  eq(after, before + 20, `A+ twice should add 20% — before ${before}, after ${after}`);
+  await page.click('.font-decrease');
+  const after2 = await page.evaluate(() => document.getElementById('reader').typography.fontSize);
+  eq(after2, before + 10, 'A- once should subtract 10%');
+  await page.evaluate(() => document.getElementById('reader').resetTypography());
 });
 
 // ---------- runner ----------

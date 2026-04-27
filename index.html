@@ -15,27 +15,27 @@
   <style>
     /* Fallback app-shell styles in case vanilla-breeze doesn't load. */
     :root {
-      --vb-color-surface: #fbfaf7;
-      --vb-color-text: #1f1f1f;
-      --vb-color-muted: #667085;
-      --vb-color-primary: #2d6cdf;
-      --vb-color-border: #e4e4e7;
+      --color-surface: #fbfaf7;
+      --color-text: #1f1f1f;
+      --color-text-muted: #667085;
+      --color-interactive: #2d6cdf;
+      --color-border: #e4e4e7;
       color-scheme: light dark;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --vb-color-surface: #17181b;
-        --vb-color-text: #f5f5f5;
-        --vb-color-muted: #9aa0a6;
-        --vb-color-primary: #6aa7ff;
-        --vb-color-border: #2a2c31;
+        --color-surface: #17181b;
+        --color-text: #f5f5f5;
+        --color-text-muted: #9aa0a6;
+        --color-interactive: #6aa7ff;
+        --color-border: #2a2c31;
       }
     }
     html, body { block-size: 100%; margin: 0; }
     body {
-      font-family: var(--vb-font-body, system-ui, -apple-system, "Segoe UI", sans-serif);
-      background: var(--vb-color-surface);
-      color: var(--vb-color-text);
+      font-family: var(--font-body, system-ui, -apple-system, "Segoe UI", sans-serif);
+      background: var(--color-surface);
+      color: var(--color-text);
       display: grid;
       grid-template-rows: auto 1fr;
       min-block-size: 100%;
@@ -46,8 +46,8 @@
       gap: .75rem;
       align-items: center;
       padding: .75rem 1rem;
-      border-block-end: 1px solid var(--vb-color-border);
-      background: var(--vb-color-surface);
+      border-block-end: 1px solid var(--color-border);
+      background: var(--color-surface);
     }
     .app-header h1 {
       font-size: 1rem;
@@ -55,21 +55,21 @@
       margin: 0;
       margin-inline-end: auto;
     }
-    .app-header h1 small { font-weight: 400; color: var(--vb-color-muted); margin-inline-start: .5rem; }
+    .app-header h1 small { font-weight: 400; color: var(--color-text-muted); margin-inline-start: .5rem; }
 
     .picker {
       display: inline-flex;
       align-items: center;
       gap: .5rem;
       padding: .4rem .7rem;
-      border: 1px solid var(--vb-color-border);
+      border: 1px solid var(--color-border);
       border-radius: .4rem;
       background: transparent;
       color: inherit;
       cursor: pointer;
       font: inherit;
     }
-    .picker:hover { background: color-mix(in srgb, var(--vb-color-primary) 8%, transparent); }
+    .picker:hover { background: color-mix(in srgb, var(--color-interactive) 8%, transparent); }
     .picker input { display: none; }
 
     main#app {
@@ -89,19 +89,19 @@
       z-index: 10;
       padding: 2rem;
       text-align: center;
-      background: color-mix(in srgb, var(--vb-color-primary) 10%, transparent);
-      outline: 3px dashed var(--vb-color-primary);
+      background: color-mix(in srgb, var(--color-interactive) 10%, transparent);
+      outline: 3px dashed var(--color-interactive);
       outline-offset: -.75rem;
-      color: var(--vb-color-text);
+      color: var(--color-text);
       font-weight: 600;
     }
     body.dragging .drop-hint { display: grid; }
 
     .samples {
-      color: var(--vb-color-muted);
+      color: var(--color-text-muted);
       font-size: .9rem;
     }
-    .samples a { color: var(--vb-color-primary); }
+    .samples a { color: var(--color-interactive); }
 
     .sample-bar {
       display: flex;
@@ -109,20 +109,20 @@
       gap: .4rem;
       align-items: center;
       padding: .5rem 1rem;
-      border-block-end: 1px solid var(--vb-color-border);
-      background: var(--vb-color-surface);
+      border-block-end: 1px solid var(--color-border);
+      background: var(--color-surface);
       font-size: .85rem;
     }
     .sample-bar[hidden] { display: none; }
     .sample-bar .label {
-      color: var(--vb-color-muted);
+      color: var(--color-text-muted);
       margin-inline-end: .25rem;
     }
     .sample-bar button {
       font: inherit;
       color: inherit;
       background: transparent;
-      border: 1px solid var(--vb-color-border);
+      border: 1px solid var(--color-border);
       border-radius: .35rem;
       padding: .25rem .55rem;
       cursor: pointer;
@@ -131,15 +131,15 @@
       align-items: baseline;
     }
     .sample-bar button:hover:not(:disabled) {
-      background: color-mix(in srgb, var(--vb-color-primary) 8%, transparent);
+      background: color-mix(in srgb, var(--color-interactive) 8%, transparent);
     }
     .sample-bar button.current {
-      border-color: var(--vb-color-primary);
-      background: color-mix(in srgb, var(--vb-color-primary) 12%, transparent);
+      border-color: var(--color-interactive);
+      background: color-mix(in srgb, var(--color-interactive) 12%, transparent);
     }
     .sample-bar button:disabled { opacity: .5; cursor: progress; }
     .sample-bar .size {
-      color: var(--vb-color-muted);
+      color: var(--color-text-muted);
       font-size: .85em;
     }
   </style>
