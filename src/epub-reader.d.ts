@@ -109,9 +109,11 @@ export type EpubSource = string | Blob | ArrayBuffer | ArrayBufferView;
  * `--color-border`). Chapter content lives in a sandboxed iframe.
  *
  * Attributes:
- * - `src`       URL of an EPUB to auto-load.
- * - `start`     Spine index to open first (default 0).
- * - `hide-toc`  Hide the TOC sidebar by default.
+ * - `src`            URL of an EPUB to auto-load.
+ * - `start`          Spine index to open first (default 0).
+ * - `hide-toc`       Hide the TOC sidebar by default.
+ * - `allow-scripts`  Add `allow-scripts` to the chapter iframe sandbox.
+ *                    Off by default — only set for content you trust.
  *
  * Events: see {@link EpubReaderEventMap}.
  */

@@ -100,6 +100,11 @@ overloads for `epub-loaded`, `epub-navigate`, and `epub-error`.
 - `src` — URL of an EPUB to auto-load.
 - `start` — Spine index to open first (default `0`).
 - `hide-toc` — Hide the table-of-contents sidebar by default.
+- `allow-scripts` — Add `allow-scripts` to the chapter iframe's `sandbox`
+  attribute so interactive EPUBs (quizzes, bindings, scripted carousels)
+  run. **Off by default.** Combining `allow-scripts` with the reader's
+  default `allow-same-origin` lets scripts in the chapter reach the
+  parent document — only enable for content you trust.
 
 **Methods**
 
