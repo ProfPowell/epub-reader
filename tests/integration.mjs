@@ -1350,6 +1350,178 @@ test('search: closing the book clears the index + highlights (issue #16)', async
   eq(state.results, 0);
 });
 
+test('highlights: programmatic add via selection works (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  // Make a selection inside the iframe of the first ~50 chars.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) {
+      if (t.data && t.data.trim().length > 20) break;
+    }
+    const range = doc.createRange();
+    range.setStart(t, 0);
+    range.setEnd(t, Math.min(t.data.length, 30));
+    const sel = win.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    // Trigger the popover's selection refresh.
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  // The popover should be visible.
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden,
+    null, { timeout: 3_000 });
+  // Click the yellow swatch.
+  await page.click('.hl-popover .hl-color[data-color="#fde68a"]');
+  // Verify a highlight mark exists in the chapter, and the public list
+  // reports one item.
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length > 0;
+  }, null, { timeout: 3_000 });
+  const list = await page.evaluate(() => document.getElementById('reader').highlights);
+  eq(list.length, 1, 'expected one persisted highlight');
+  eq(list[0].color, '#fde68a');
+  truthy(list[0].text.length > 0);
+  // Cleanup
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('highlights: re-applied when chapter reloads (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Simulate a saved highlight by dispatching a selection + colour click.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) { if (t.data && t.data.trim().length > 20) break; }
+    const range = doc.createRange();
+    range.setStart(t, 0); range.setEnd(t, 25);
+    win.getSelection().removeAllRanges();
+    win.getSelection().addRange(range);
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden);
+  await page.click('.hl-popover .hl-color[data-color="#bbf7d0"]');
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length > 0;
+  });
+
+  // Navigate away and back — highlight wrapper should reappear.
+  await page.evaluate(() => document.getElementById('reader').goToIndex(6));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  const onAwayMarks = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length;
+  });
+  eq(onAwayMarks, 0, 'no highlights expected on a different chapter');
+
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length > 0;
+  }, null, { timeout: 5_000 });
+  // Cleanup
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('highlights: removeHighlight clears the in-memory list + chapter mark (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) { if (t.data && t.data.trim().length > 30) break; }
+    const r = doc.createRange();
+    r.setStart(t, 0); r.setEnd(t, 25);
+    win.getSelection().removeAllRanges();
+    win.getSelection().addRange(r);
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden);
+  await page.click('.hl-popover .hl-color[data-color="#fde68a"]');
+  await page.waitForFunction(() =>
+    document.getElementById('reader').highlights.length === 1, null, { timeout: 5_000 });
+
+  // Now remove it. Both the array and the chapter mark must go.
+  const id = await page.evaluate(() => document.getElementById('reader').highlights[0].id);
+  await page.evaluate((id) => document.getElementById('reader').removeHighlight(id), id);
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      list: r.highlights.length,
+      marks: doc.querySelectorAll('[data-reader-mark="highlight"]').length,
+    };
+  });
+  eq(state.list, 0, 'removed highlight should leave list empty');
+  eq(state.marks, 0, 'removed highlight should drop its <mark> wrapper');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('highlights: panel renders entries and click jumps to the chapter (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Add a highlight.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) { if (t.data && t.data.trim().length > 30) break; }
+    const r = doc.createRange();
+    r.setStart(t, 0); r.setEnd(t, 25);
+    win.getSelection().removeAllRanges();
+    win.getSelection().addRange(r);
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden);
+  await page.click('.hl-popover .hl-color[data-color="#fbcfe8"]');
+  await page.waitForFunction(() => document.getElementById('reader').highlights.length === 1);
+
+  // Navigate elsewhere, then open panel and click the entry → land back here.
+  await page.evaluate(() => document.getElementById('reader').goToIndex(0));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.click('.highlights-toggle');
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.highlights-panel').hidden &&
+    document.getElementById('reader').querySelectorAll('.hl-list li').length === 1);
+  await page.click('.hl-list .hl-jump');
+  await page.waitForFunction(() => {
+    return document.getElementById('reader').querySelector('.progress').textContent === '6 / 144';
+  }, null, { timeout: 8_000 });
+  // Cleanup
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;

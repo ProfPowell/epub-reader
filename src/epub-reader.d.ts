@@ -117,6 +117,23 @@ export interface EpubBookmarksChangeDetail {
   bookmarks: Bookmark[];
 }
 
+/** One user highlight within a book. */
+export interface Highlight {
+  id: string;
+  spineIndex: number;
+  startOffset: number;
+  endOffset: number;
+  text: string;
+  color: string;
+  note: string;
+  createdAt: number;
+}
+
+/** Detail payload for the `epub-highlights-change` event. */
+export interface EpubHighlightsChangeDetail {
+  highlights: Highlight[];
+}
+
 /** One stored library entry — the bytes plus the metadata to render a card. */
 export interface LibraryEntry {
   id: string;
@@ -160,6 +177,7 @@ export interface EpubReaderEventMap {
   'epub-typography-change':   CustomEvent<EpubTypographyChangeDetail>;
   'epub-position-restored':   CustomEvent<EpubPositionRestoredDetail>;
   'epub-bookmarks-change':    CustomEvent<EpubBookmarksChangeDetail>;
+  'epub-highlights-change':   CustomEvent<EpubHighlightsChangeDetail>;
   'epub-library-change':      CustomEvent<EpubLibraryChangeDetail>;
 }
 
@@ -227,6 +245,15 @@ export class EpubReaderElement extends HTMLElement {
 
   /** Jump to a bookmark (chapter + scroll position). */
   goToBookmark(id: string): Promise<void>;
+
+  /** Read-only snapshot of the current book's highlights. */
+  readonly highlights: Highlight[];
+
+  /** Remove a highlight by id. Resolves true if a highlight was removed. */
+  removeHighlight(id: string): Promise<boolean>;
+
+  /** Jump to a stored highlight (chapter + scroll into the wrapper). */
+  goToHighlight(id: string): Promise<void>;
 
   /**
    * Snapshot of all stored library entries, sorted by most recently

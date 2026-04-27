@@ -46,6 +46,22 @@ import { findOffsets, plainText, rangeFromOffsets, wrapRange, unwrapAll, offsets
  */
 
 /**
+ * One user highlight. Position is captured as (start, end) char
+ * offsets into the chapter body's plain text via range-utils, which
+ * survives publisher CSS shuffling and is far simpler than CFI.
+ *
+ * @typedef {object} Highlight
+ * @property {string} id           Stable random id.
+ * @property {number} spineIndex
+ * @property {number} startOffset  Char offset (inclusive).
+ * @property {number} endOffset    Char offset (exclusive).
+ * @property {string} text         Snapshot of the highlighted text (≤200 chars).
+ * @property {string} color        CSS colour (one of the popover swatches by default).
+ * @property {string} note         Optional user note.
+ * @property {number} createdAt
+ */
+
+/**
  * One stored library entry. The whole record (including the source
  * blob) lives in IndexedDB so the user doesn't need to re-pick the
  * file to keep reading.
@@ -128,6 +144,11 @@ import { findOffsets, plainText, rangeFromOffsets, wrapRange, unwrapAll, offsets
  * @property {HTMLElement}         searchStatus
  * @property {HTMLOListElement}    searchResults
  * @property {HTMLButtonElement}   searchClose
+ * @property {HTMLButtonElement}   highlightsToggle
+ * @property {HTMLElement}         highlightsPanel
+ * @property {HTMLOListElement}    hlList
+ * @property {HTMLButtonElement}   hlPanelClose
+ * @property {HTMLElement}         hlPopover
  */
 
 /**
@@ -533,6 +554,136 @@ const COMPONENT_CSS = `
   /* Solid star when bookmark exists at current position. */
   :scope([data-bookmark-active]) .bookmarks-toggle::before { content: ''; }
 
+  /* Highlight selection popover — floats above the iframe selection. */
+  .hl-popover {
+    position: absolute;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.3rem;
+    background: var(--color-surface, #fff);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-full, 999px);
+    box-shadow: var(--shadow-l, 0 8px 24px rgba(0,0,0,0.12));
+    transform: translate(-50%, -100%);
+  }
+  .hl-popover[hidden] { display: none; }
+  .hl-popover .hl-color {
+    inline-size: 1.5rem;
+    block-size: 1.5rem;
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background: var(--c);
+    cursor: pointer;
+    padding: 0;
+  }
+  .hl-popover .hl-color:hover { border-color: var(--color-text, #1f1f1f); }
+  .hl-popover .hl-note {
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: 999px;
+    padding: 0.2rem 0.6rem;
+    cursor: pointer;
+    font-size: 0.85em;
+  }
+
+  /* Highlights / notes panel — same shape as bookmarks. */
+  .highlights-panel {
+    position: absolute;
+    inset-block-start: calc(100% + 0.25rem);
+    inset-inline-end: var(--size-s, 0.75rem);
+    z-index: 4;
+    inline-size: min(22rem, calc(100vw - 1rem));
+    max-block-size: min(70vh, 32rem);
+    overflow: auto;
+    background: var(--color-surface, #fbfaf7);
+    color: var(--color-text, #1f1f1f);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-m, 0.5rem);
+    box-shadow: var(--shadow-l, 0 8px 24px rgba(0, 0, 0, 0.12));
+    padding: 0.75rem;
+    display: grid;
+    gap: 0.5rem;
+    font-size: var(--font-size-s, 0.9rem);
+  }
+  .highlights-panel[hidden] { display: none; }
+  .highlights-panel h3 {
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-muted, #667085);
+    margin: 0;
+  }
+  .highlights-panel .hl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
+  .highlights-panel .hl-list li {
+    display: grid;
+    grid-template-columns: 0.5rem 1fr auto;
+    gap: 0.5rem;
+    align-items: start;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+    padding: 0.4rem 0.5rem;
+  }
+  .highlights-panel .hl-swatch {
+    inline-size: 0.5rem;
+    block-size: 100%;
+    min-block-size: 1.5rem;
+    border-radius: 2px;
+    background: var(--c, #fde68a);
+  }
+  .highlights-panel .hl-jump {
+    text-align: start; padding: 0; border: 0; background: transparent;
+    cursor: pointer; color: inherit; min-inline-size: 0;
+    display: grid; gap: 0.15rem;
+  }
+  .highlights-panel .hl-jump .hl-text {
+    line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 0.95em;
+  }
+  .highlights-panel .hl-jump .hl-meta {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.8em;
+  }
+  .highlights-panel .hl-jump .hl-note-text {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+    font-style: italic;
+  }
+  .highlights-panel .hl-remove {
+    inline-size: 1.5rem; block-size: 1.5rem;
+    display: inline-grid; place-items: center;
+    border-radius: 999px;
+    background: transparent;
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    cursor: pointer;
+    padding: 0; font-size: 0.9em;
+    color: inherit;
+  }
+  .highlights-panel .hl-empty {
+    color: var(--color-text-muted, #667085);
+    font-size: 0.85em;
+    text-align: center;
+    padding-block: 0.5rem;
+  }
+  .highlights-panel:not([data-empty="true"]) .hl-empty { display: none; }
+  .highlights-panel[data-empty="true"] .hl-list { display: none; }
+  .highlights-panel button.primary {
+    background: var(--color-interactive, #2d6cdf);
+    color: var(--color-interactive-text, white);
+    border-color: transparent;
+    border: 0;
+    border-radius: var(--radius-s, 0.35rem);
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+    font: inherit;
+  }
+  .highlights-panel .row { display: flex; justify-content: flex-end; }
+
   /* Search panel: full content-area overlay like the library, but
      denser since each result is short. */
   .search-panel {
@@ -864,6 +1015,7 @@ const TEMPLATE = `
       <button class="reader-icon-btn font-decrease" type="button" aria-label="Decrease font size">A&minus;</button>
       <button class="reader-icon-btn font-increase" type="button" aria-label="Increase font size">A+</button>
       <button class="reader-icon-btn search-toggle" type="button" aria-label="Search book" aria-expanded="false" title="Search whole book">&#128269;</button>
+      <button class="reader-icon-btn highlights-toggle" type="button" aria-label="Highlights" aria-expanded="false" title="Highlights &amp; notes">&#128396;</button>
       <button class="reader-icon-btn bookmarks-toggle" type="button" aria-label="Bookmarks" aria-expanded="false" aria-pressed="false" title="Bookmarks (b to toggle)">&#9734;</button>
       <button class="reader-icon-btn library-toggle" type="button" aria-label="Library" aria-expanded="false" title="Library">&#128218;</button>
       <button class="reader-icon-btn settings-toggle" type="button" aria-label="Reading settings" aria-expanded="false" title="Reading settings">Aa</button>
@@ -967,6 +1119,22 @@ const TEMPLATE = `
       </div>
     </aside>
     <iframe sandbox="allow-same-origin" title="EPUB content"></iframe>
+    <div class="hl-popover" role="toolbar" aria-label="Highlight" hidden>
+      <button type="button" class="hl-color" data-color="#fde68a" aria-label="Yellow highlight" style="--c:#fde68a"></button>
+      <button type="button" class="hl-color" data-color="#bbf7d0" aria-label="Green highlight" style="--c:#bbf7d0"></button>
+      <button type="button" class="hl-color" data-color="#bfdbfe" aria-label="Blue highlight" style="--c:#bfdbfe"></button>
+      <button type="button" class="hl-color" data-color="#fbcfe8" aria-label="Pink highlight" style="--c:#fbcfe8"></button>
+      <button type="button" class="hl-color" data-color="#fed7aa" aria-label="Orange highlight" style="--c:#fed7aa"></button>
+      <button type="button" class="hl-note" aria-label="Add note">Note&hellip;</button>
+    </div>
+    <aside class="highlights-panel" role="dialog" aria-label="Highlights" hidden>
+      <h3>Highlights &amp; notes</h3>
+      <ol class="hl-list" aria-live="polite"></ol>
+      <div class="hl-empty">No highlights yet — select text in a chapter and pick a colour.</div>
+      <div class="row">
+        <button type="button" class="hl-close primary">Done</button>
+      </div>
+    </aside>
     <div class="overlay">
       <div class="message">Drop an EPUB file here or choose one to begin.</div>
     </div>
@@ -1046,6 +1214,11 @@ export class EpubReaderElement extends HTMLElement {
       searchStatus:       $('.srch-status'),
       searchResults:      $('.search-results'),
       searchClose:        $('.search-close'),
+      highlightsToggle:   $('.highlights-toggle'),
+      highlightsPanel:    $('.highlights-panel'),
+      hlList:             $('.hl-list'),
+      hlPanelClose:       $('.hl-close'),
+      hlPopover:          $('.hl-popover'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
@@ -1087,6 +1260,16 @@ export class EpubReaderElement extends HTMLElement {
     });
     this.#els.searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { this.#toggleSearchPanel(false); e.preventDefault(); }
+    });
+    // Highlights panel + popover.
+    this.#els.highlightsToggle.addEventListener('click', () => this.#toggleHighlightsPanel());
+    this.#els.hlPanelClose.addEventListener('click', () => this.#toggleHighlightsPanel(false));
+    this.#els.hlPopover.addEventListener('click', (ev) => {
+      const target = /** @type {HTMLElement} */ (ev.target);
+      const colorBtn = target.closest('.hl-color');
+      const noteBtn = target.closest('.hl-note');
+      if (colorBtn) this.#addHighlightFromSelection(colorBtn.getAttribute('data-color') || '#fde68a');
+      else if (noteBtn) this.#addHighlightFromSelection('#fde68a', /* withNote */ true);
     });
     this.#els.iframe.addEventListener('load', () => this.#onIframeLoad());
     this.addEventListener('keydown', (e) => this.#onKeyDown(e));
@@ -1168,8 +1351,9 @@ export class EpubReaderElement extends HTMLElement {
       // restored chapter and skip rendering the start-of-book first.
       this.#bookId = await book.bookId().catch(() => null);
       const stored = this.#bookId ? await dbGet('positions', this.#bookId) : null;
-      // Load bookmarks for this book before rendering.
+      // Load bookmarks + highlights for this book before rendering.
       await this.#loadBookmarks();
+      await this.#loadHighlights();
 
       const startAttr = Number(this.getAttribute('start') || 0) || 0;
       const startIndex = Math.max(0, Math.min(book.spine.length - 1, startAttr));
@@ -1622,6 +1806,239 @@ export class EpubReaderElement extends HTMLElement {
     }
   }
 
+  // ------- highlights (#15) -------
+
+  /** @type {Highlight[]} */ #highlights = [];
+
+  /** @returns {Promise<void>} */
+  async #loadHighlights() {
+    this.#highlights = [];
+    if (!this.#bookId) { this.#renderHighlights(); return; }
+    const rec = await dbGet('highlights', this.#bookId);
+    if (rec && Array.isArray(rec.items)) this.#highlights = rec.items;
+    this.#renderHighlights();
+  }
+
+  async #saveHighlights() {
+    if (!this.#bookId) return;
+    await dbPut('highlights', {
+      id: this.#bookId,
+      items: this.#highlights,
+      updatedAt: Date.now(),
+    });
+  }
+
+  /** Read-only snapshot of the current book's highlights. */
+  get highlights() { return this.#highlights.map(h => ({ ...h })); }
+
+  /**
+   * Capture the selection in the chapter iframe as a new highlight.
+   * @param {string} color
+   * @param {boolean} [withNote]  If true, prompt the user for a note.
+   * @returns {Promise<Highlight | null>}
+   */
+  async #addHighlightFromSelection(color, withNote = false) {
+    const doc = this.#els.iframe.contentDocument;
+    const sel = doc?.getSelection?.();
+    if (!doc?.body || !sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      this.#hideHighlightPopover();
+      return null;
+    }
+    const range = sel.getRangeAt(0);
+    const offsets = offsetsFromRange(doc.body, range);
+    if (!offsets) { this.#hideHighlightPopover(); return null; }
+    const text = range.toString().trim().slice(0, 200);
+    let note = '';
+    if (withNote) {
+      const win = this.ownerDocument?.defaultView;
+      note = (win?.prompt('Note for this highlight (optional):', '') || '').trim();
+    }
+    const hl = /** @type {Highlight} */ ({
+      id: 'hl_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
+      spineIndex: this.#currentIndex,
+      startOffset: offsets.start,
+      endOffset: offsets.end,
+      text, color, note,
+      createdAt: Date.now(),
+    });
+    this.#highlights = [...this.#highlights, hl]
+      .sort((a, b) => a.spineIndex - b.spineIndex || a.startOffset - b.startOffset);
+    await this.#saveHighlights();
+    this.#applyHighlightsTo(doc);
+    this.#renderHighlights();
+    sel.removeAllRanges();
+    this.#hideHighlightPopover();
+    this.dispatchEvent(new CustomEvent('epub-highlights-change', {
+      detail: { highlights: this.highlights },
+      bubbles: true, composed: true,
+    }));
+    return hl;
+  }
+
+  /**
+   * Public removal API — used by the panel × button.
+   * @param {string} id
+   * @returns {Promise<boolean>}
+   */
+  async removeHighlight(id) {
+    const before = this.#highlights.length;
+    this.#highlights = this.#highlights.filter(h => h.id !== id);
+    if (this.#highlights.length === before) return false;
+    await this.#saveHighlights();
+    const doc = this.#els.iframe.contentDocument;
+    if (doc) this.#applyHighlightsTo(doc);
+    this.#renderHighlights();
+    this.dispatchEvent(new CustomEvent('epub-highlights-change', {
+      detail: { highlights: this.highlights },
+      bubbles: true, composed: true,
+    }));
+    return true;
+  }
+
+  /**
+   * Jump to a stored highlight (chapter + scroll into the wrapper).
+   * @param {string} id
+   */
+  async goToHighlight(id) {
+    const hl = this.#highlights.find(h => h.id === id);
+    if (!hl || !this.#book) return;
+    if (hl.spineIndex < 0 || hl.spineIndex >= this.#book.spine.length) return;
+    if (this.#currentIndex !== hl.spineIndex) {
+      await this.goToIndex(hl.spineIndex);
+      // Wait one iframe-load tick for the marks to be applied.
+      await new Promise(r => this.#els.iframe.addEventListener('load', () => r(undefined), { once: true }));
+    }
+    const doc = this.#els.iframe.contentDocument;
+    const target = /** @type {HTMLElement | null} */ (doc?.querySelector(`[data-reader-mark="highlight"][data-id="${CSS.escape(id)}"]`));
+    target?.scrollIntoView({ block: 'center' });
+  }
+
+  /**
+   * Apply (or refresh) the highlight wrappers in the chapter doc.
+   * Always wraps from the offsets (not the prior wrappers) so DOM
+   * mutations between chapter loads can't drift.
+   * @param {Document} doc
+   */
+  #applyHighlightsTo(doc) {
+    if (!doc.body) return;
+    unwrapAll(doc.body, '[data-reader-mark="highlight"]');
+    const here = this.#highlights.filter(h => h.spineIndex === this.#currentIndex);
+    for (const h of here) {
+      const range = rangeFromOffsets(doc.body, h.startOffset, h.endOffset);
+      if (!range) continue;
+      wrapRange(range, () => {
+        const m = doc.createElement('mark');
+        m.setAttribute('data-reader-mark', 'highlight');
+        m.dataset.id = h.id;
+        m.style.setProperty('--reader-hl-color', h.color);
+        if (h.note) m.title = h.note;
+        return m;
+      });
+    }
+  }
+
+  /**
+   * Selection-popover lifecycle. Listens for selection changes inside
+   * the iframe, positions the popover above the selection (translated
+   * from iframe coordinates to host coordinates).
+   * @param {HTMLIFrameElement} iframe
+   */
+  #wireHighlightSelection(iframe) {
+    const doc = iframe.contentDocument;
+    if (!doc) return;
+    const update = () => this.#updateHighlightPopover();
+    doc.addEventListener('mouseup', update);
+    doc.addEventListener('keyup', update);
+    doc.addEventListener('selectionchange', update);
+  }
+
+  #updateHighlightPopover() {
+    const iframe = this.#els.iframe;
+    const doc = iframe.contentDocument;
+    const sel = doc?.getSelection?.();
+    if (!doc || !sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      this.#hideHighlightPopover();
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      this.#hideHighlightPopover();
+      return;
+    }
+    const ifr = iframe.getBoundingClientRect();
+    const host = this.getBoundingClientRect();
+    const popover = this.#els.hlPopover;
+    popover.hidden = false;
+    popover.style.left = (ifr.left - host.left + rect.left + rect.width / 2) + 'px';
+    popover.style.top = (ifr.top - host.top + rect.top - 8) + 'px';
+  }
+
+  #hideHighlightPopover() { this.#els.hlPopover.hidden = true; }
+
+  #toggleHighlightsPanel(force) {
+    const open = typeof force === 'boolean' ? force : this.#els.highlightsPanel.hidden;
+    this.#els.highlightsPanel.hidden = !open;
+    this.#els.highlightsToggle.setAttribute('aria-expanded', String(open));
+    if (open) {
+      // Mutually exclusive popovers.
+      this.#els.bookmarksPanel.hidden = true;
+      this.#els.bookmarksToggle.setAttribute('aria-expanded', 'false');
+      this.#els.libraryPanel.hidden = true;
+      this.#els.libraryToggle.setAttribute('aria-expanded', 'false');
+      this.#els.settingsPanel.hidden = true;
+      this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
+      this.#els.searchPanel.hidden = true;
+      this.#els.searchToggle.setAttribute('aria-expanded', 'false');
+      this.#renderHighlights();
+    }
+  }
+
+  #renderHighlights() {
+    const ol = this.#els.hlList;
+    const panel = this.#els.highlightsPanel;
+    panel.dataset.empty = String(this.#highlights.length === 0);
+    ol.innerHTML = '';
+    for (const h of this.#highlights) {
+      const li = document.createElement('li');
+      li.dataset.id = h.id;
+
+      const swatch = document.createElement('span');
+      swatch.className = 'hl-swatch';
+      swatch.style.setProperty('--c', h.color);
+
+      const jump = document.createElement('button');
+      jump.type = 'button';
+      jump.className = 'hl-jump';
+      const text = document.createElement('span');
+      text.className = 'hl-text';
+      text.textContent = `“${h.text}”`;
+      const meta = document.createElement('span');
+      meta.className = 'hl-meta';
+      const chapter = this.#book?.spine[h.spineIndex];
+      const chapterTitle = chapter ? this.#tocLabelForPath(chapter.path) : '';
+      meta.textContent = chapterTitle || `Chapter ${h.spineIndex + 1}`;
+      jump.append(text, meta);
+      if (h.note) {
+        const noteEl = document.createElement('span');
+        noteEl.className = 'hl-note-text';
+        noteEl.textContent = h.note;
+        jump.append(noteEl);
+      }
+      jump.addEventListener('click', () => this.goToHighlight(h.id));
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'hl-remove';
+      remove.setAttribute('aria-label', 'Remove highlight');
+      remove.textContent = '×';
+      remove.addEventListener('click', (ev) => { ev.stopPropagation(); this.removeHighlight(h.id); });
+
+      li.append(swatch, jump, remove);
+      ol.append(li);
+    }
+  }
+
   // ------- bookmarks -------
 
   /**
@@ -1898,16 +2315,21 @@ export class EpubReaderElement extends HTMLElement {
     }));
   }
 
-  /** Drop every library entry (and reading positions / bookmarks). */
+  /** Drop every library entry (and reading positions / bookmarks / highlights). */
   async clearLibrary() {
     await dbClear('library');
     await dbClear('positions');
     await dbClear('bookmarks');
+    await dbClear('highlights');
     // Reflect the wipe in the open book's in-memory state so the UI
     // updates without a reload.
     this.#bookmarks = [];
     this.#renderBookmarks();
     this.#updateBookmarkButton();
+    this.#highlights = [];
+    this.#renderHighlights();
+    const doc = this.#els.iframe.contentDocument;
+    if (doc?.body) unwrapAll(doc.body, '[data-reader-mark="highlight"]');
     this.dispatchEvent(new CustomEvent('epub-library-change', {
       detail: { reason: 'cleared', id: null },
       bubbles: true, composed: true,
@@ -2036,6 +2458,11 @@ export class EpubReaderElement extends HTMLElement {
     this.#bookmarks = [];
     this.#renderBookmarks();
     this.#updateBookmarkButton();
+    this.#highlights = [];
+    this.#renderHighlights();
+    this.#hideHighlightPopover();
+    this.#els.highlightsPanel.hidden = true;
+    this.#els.highlightsToggle.setAttribute('aria-expanded', 'false');
     this.find(false);
     // Reset full-text search state — index belongs to the closed book.
     this.#searchIndex = null;
@@ -2224,6 +2651,10 @@ export class EpubReaderElement extends HTMLElement {
     if (this.#searchQuery && doc.body) {
       this.#highlightSearchInChapter(doc, this.#searchQuery);
     }
+    // Re-apply persisted highlights for the new chapter + listen for
+    // selections so the popover can offer to add new highlights.
+    this.#applyHighlightsTo(doc);
+    this.#wireHighlightSelection(iframe);
 
     // Scroll to the requested fragment, if any.
     const frag = iframe.dataset.fragment;
@@ -2698,6 +3129,11 @@ export class EpubReaderElement extends HTMLElement {
           !path.includes(e.searchPanel) &&
           !path.includes(e.searchToggle)) {
         this.#toggleSearchPanel(false);
+      }
+      if (!e.highlightsPanel.hidden &&
+          !path.includes(e.highlightsPanel) &&
+          !path.includes(e.highlightsToggle)) {
+        this.#toggleHighlightsPanel(false);
       }
     });
   }
