@@ -387,6 +387,72 @@ test('font A-/A+ buttons step the typography fontSize', async (h, { page }) => {
   await page.evaluate(() => document.getElementById('reader').resetTypography());
 });
 
+test('TOC: <span> group labels render as headings, not anchors (issue #2)', async (h, { page }) => {
+  await h.openSample('childrens-literature.epub');
+  // The deeply-nested nav uses <span class="author"> for group headings
+  // like "Abram S. Isaacs" / "Hans Christian Andersen". Those should
+  // render as .toc-heading (a <strong>), not as a clickable <a>.
+  const tocStats = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const headings = [...r.querySelectorAll('.toc .toc-heading')].map(h => h.textContent.trim());
+    const anchors = [...r.querySelectorAll('.toc a')].map(a => a.textContent.trim());
+    return { headings, anchors, headingCount: headings.length, anchorCount: anchors.length };
+  });
+  truthy(tocStats.headingCount > 0, `expected at least one .toc-heading, got ${tocStats.headingCount}`);
+  truthy(
+    tocStats.headings.some(h => /Isaacs|Andersen|Browne|Wilde/i.test(h)),
+    `expected an author-name heading, got: ${JSON.stringify(tocStats.headings.slice(0, 5))}`
+  );
+  // The chapter links (those with href) should still be present.
+  truthy(tocStats.anchorCount > 0, 'expected anchors for chapter links');
+  // No TOC anchor should have an empty data-path (which would mean an
+  // anchor was rendered for a label that has no target).
+  const emptyPathAnchors = await page.evaluate(() =>
+    [...document.getElementById('reader').querySelectorAll('.toc a')].filter(a => !a.dataset.path).length);
+  eq(emptyPathAnchors, 0, 'no TOC anchor should have empty data-path');
+});
+
+test('TOC: clicking a deep-fragment entry scrolls past the chapter top (issue #3)', async (h, { page }) => {
+  // childrens-literature.epub has a single-chapter structure where the
+  // nav doc points at fragments inside s04.xhtml. Click an entry deep
+  // in the file and verify the iframe is scrolled meaningfully past 0.
+  await h.openSample('childrens-literature.epub');
+  const target = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const anchors = [...r.querySelectorAll('.toc a')].filter(a => a.dataset.fragment);
+    // Pick an entry roughly mid-list to ensure a non-trivial scroll.
+    const hit = anchors[Math.floor(anchors.length / 2)] || anchors[0];
+    if (!hit) return null;
+    const info = { path: hit.dataset.path, fragment: hit.dataset.fragment };
+    hit.click();
+    return info;
+  });
+  truthy(target, 'expected at least one fragment-targeted TOC entry');
+  // Wait for the iframe to settle on the right chapter and a non-zero scroll.
+  await page.waitForFunction((t) => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    if (!doc?.body) return false;
+    const el = doc.getElementById(t.fragment);
+    if (!el) return false;
+    // Either the element is near the viewport top (scrolled into view),
+    // or the document has scrolled at all.
+    const rect = el.getBoundingClientRect();
+    const scrolled = (doc.scrollingElement?.scrollTop || 0) > 100;
+    return scrolled && Math.abs(rect.top) < 200;
+  }, target, { timeout: 8_000 });
+  const stats = await page.evaluate((t) => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    const el = doc.getElementById(t.fragment);
+    return {
+      scrollTop: doc.scrollingElement?.scrollTop || 0,
+      targetTop: el ? Math.round(el.getBoundingClientRect().top) : null,
+    };
+  }, target);
+  truthy(stats.scrollTop > 100, `expected scrollTop > 100 after deep-fragment click, got ${stats.scrollTop}`);
+  truthy(Math.abs(stats.targetTop) < 200, `target should be near viewport top, got top=${stats.targetTop}`);
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;
