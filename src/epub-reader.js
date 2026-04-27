@@ -27,8 +27,20 @@
 //   epub-error       detail: { error }
 
 import { openEpub } from './epub.js';
+import { dbGet, dbPut } from './storage.js';
 /** @typedef {import('./epub.js').EpubBook} EpubBook */
 /** @typedef {import('./epub.js').TocEntry} TocEntry */
+
+/**
+ * Persisted reading-position record stored under
+ * IndexedDB(epub-reader).positions[bookId].
+ *
+ * @typedef {object} ReadingPosition
+ * @property {string} id              Book identifier (`id:...` or `sha:...`).
+ * @property {number} spineIndex      Spine index of the chapter when saved.
+ * @property {number} scrollFraction  0..1 within the chapter (scroll mode).
+ * @property {number} updatedAt       `Date.now()` at save time.
+ */
 
 /**
  * @typedef {object} ReaderElements
@@ -59,6 +71,7 @@ import { openEpub } from './epub.js';
  * @property {HTMLSpanElement}     sReadingWidthV
  * @property {HTMLButtonElement}   sLayoutScroll
  * @property {HTMLButtonElement}   sLayoutPaginated
+ * @property {HTMLTextAreaElement} sUserCss
  * @property {HTMLButtonElement}   sReset
  * @property {HTMLButtonElement}   sClose
  */
@@ -80,6 +93,10 @@ import { openEpub } from './epub.js';
  *                                                        Default 65.
  * @property {'scroll' | 'paginated'}  layoutMode         Reflowable layout
  *                                                        mode (default 'scroll').
+ * @property {string}                  userCss            Power-user CSS
+ *                                                        appended to the
+ *                                                        chapter stylesheet
+ *                                                        after sanitisation.
  */
 
 const TYPOGRAPHY_KEY = 'epub-reader:typography';
@@ -94,7 +111,30 @@ function defaultTypography() {
     justify: null,
     readingWidth: 65,
     layoutMode: 'scroll',
+    userCss: '',
   };
+}
+
+/**
+ * Strip CSS authoring constructs that have no place in a user stylesheet
+ * applied to chapter content. We can't fully sanitise CSS, but blocking
+ * the obvious vectors is cheap:
+ *   - HTML tag chars  -> illegal in CSS, almost always a paste mistake.
+ *   - @import         -> would let the user load arbitrary remote URLs.
+ *   - expression(...) -> legacy IE attack surface; ignored by modern
+ *                        browsers but still worth flagging.
+ *   - behavior:       -> legacy IE, same reasoning.
+ *
+ * @param {string} css
+ * @returns {string}
+ */
+function sanitiseUserCss(css) {
+  if (!css) return '';
+  return String(css)
+    .replace(/[<>]/g, '')
+    .replace(/@import\b[^;]*;?/gi, '/* @import blocked */')
+    .replace(/\bexpression\s*\(/gi, '/*expression(*/')
+    .replace(/\bbehavior\s*:/gi, '/*behavior:*/');
 }
 
 /** @returns {TypographySettings} */
@@ -140,6 +180,9 @@ function buildTypographyCss(/** @type {TypographySettings} */ t) {
     // measure exactly.
     rules.push(`body { max-inline-size: ${t.readingWidth}ch !important; margin-inline: auto !important; padding-inline: clamp(0.75rem, 3vw, 2rem) !important; }`);
   }
+  // User CSS comes last so it overrides any of the curated rules above.
+  const user = sanitiseUserCss(t.userCss);
+  if (user) rules.push(`/* --- user css --- */\n${user}`);
   return rules.join('\n');
 }
 
@@ -346,6 +389,28 @@ const COMPONENT_CSS = `
   .settings-panel input[type="range"] { padding: 0; }
   .settings-panel .row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .settings-panel .row.checkbox label { grid-template-columns: auto 1fr; gap: 0.5rem; }
+  .settings-panel details.user-css summary {
+    font-size: var(--font-size-2xs, 0.7rem);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted, #667085);
+    cursor: pointer;
+    padding-block: 0.25rem;
+  }
+  .settings-panel textarea {
+    inline-size: 100%;
+    min-block-size: 5rem;
+    font: inherit;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.85em;
+    color: inherit;
+    background: var(--color-background, transparent);
+    border: var(--border-width-thin, 1px) solid var(--color-border, #e4e4e7);
+    border-radius: var(--radius-s, 0.25rem);
+    padding: 0.4rem;
+    resize: vertical;
+    box-sizing: border-box;
+  }
   .settings-panel button {
     font: inherit; color: inherit;
     background: transparent;
@@ -439,6 +504,11 @@ const TEMPLATE = `
           <button type="button" class="reader-seg-btn s-layout-paginated" data-mode="paginated" role="radio">Paginated</button>
         </div>
       </label>
+      <details class="user-css">
+        <summary>Custom CSS</summary>
+        <textarea class="s-user-css" rows="4" spellcheck="false"
+          placeholder="body { font-feature-settings: 'onum'; }"></textarea>
+      </details>
       <div class="row">
         <button type="button" class="s-reset">Reset</button>
         <button type="button" class="s-close primary">Done</button>
@@ -498,6 +568,7 @@ export class EpubReaderElement extends HTMLElement {
       sReadingWidthV:     $('.s-reading-width-v'),
       sLayoutScroll:      $('.s-layout-scroll'),
       sLayoutPaginated:   $('.s-layout-paginated'),
+      sUserCss:           $('.s-user-css'),
       sReset:             $('.s-reset'),
       sClose:             $('.s-close'),
     };
@@ -579,11 +650,18 @@ export class EpubReaderElement extends HTMLElement {
       const book = await openEpub(source);
       if (token !== this.#loadToken) { book.destroy(); return; }
       this.#book = book;
+      this.#bookId = null;
       this.#renderToc();
-      const start = Math.max(0, Math.min(
-        book.spine.length - 1,
-        Number(this.getAttribute('start') || 0) || 0
-      ));
+
+      // Resolve the persistence key + look up any stored position before
+      // we land on the start chapter, so we can land directly on the
+      // restored chapter and skip rendering the start-of-book first.
+      this.#bookId = await book.bookId().catch(() => null);
+      const stored = this.#bookId ? await dbGet('positions', this.#bookId) : null;
+
+      const startAttr = Number(this.getAttribute('start') || 0) || 0;
+      const startIndex = Math.max(0, Math.min(book.spine.length - 1, startAttr));
+
       this.dispatchEvent(new CustomEvent('epub-loaded', {
         detail: {
           metadata: book.metadata,
@@ -593,7 +671,25 @@ export class EpubReaderElement extends HTMLElement {
         bubbles: true,
         composed: true,
       }));
-      await this.goToIndex(start);
+
+      // Validate the stored position against the current spine before
+      // restoring — books update, indices shift.
+      const restoreIdx = stored && stored.spineIndex >= 0 && stored.spineIndex < book.spine.length
+        ? stored.spineIndex : -1;
+      if (restoreIdx >= 0) {
+        await this.goToIndex(restoreIdx);
+        this.#applyRestoredScroll(stored.scrollFraction);
+        this.dispatchEvent(new CustomEvent('epub-position-restored', {
+          detail: {
+            spineIndex: stored.spineIndex,
+            scrollFraction: stored.scrollFraction,
+            bookId: this.#bookId,
+          },
+          bubbles: true, composed: true,
+        }));
+      } else {
+        await this.goToIndex(startIndex);
+      }
       this.#hideOverlay();
     } catch (err) {
       if (token !== this.#loadToken) return;
@@ -604,6 +700,71 @@ export class EpubReaderElement extends HTMLElement {
         composed: true,
       }));
     }
+  }
+
+  /** Most recent book identifier (used as the IndexedDB key for persistence). */
+  /** @type {string | null} */ #bookId = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */ #saveTimer = null;
+  /** Suppress saves while we're applying a restored position. */
+  #suppressSave = false;
+
+  /**
+   * Re-apply a stored scroll fraction once the chapter iframe finishes
+   * loading. Skipped in paginated mode (scrollFraction has no meaning
+   * across columns) and for fixed-layout chapters (no scroll).
+   * @param {number} scrollFraction
+   */
+  #applyRestoredScroll(scrollFraction) {
+    if (!Number.isFinite(scrollFraction) || scrollFraction <= 0) return;
+    if (this.#typography.layoutMode === 'paginated') return;
+    const item = this.#book?.spine[this.#currentIndex];
+    if (item?.layout === 'pre-paginated') return;
+    this.#suppressSave = true;
+    const apply = () => {
+      const doc = this.#els.iframe.contentDocument;
+      const se = doc?.scrollingElement || doc?.documentElement;
+      if (!se) return;
+      const max = se.scrollHeight - se.clientHeight;
+      if (max > 0) se.scrollTop = scrollFraction * max;
+    };
+    requestAnimationFrame(apply);
+    this.#els.iframe.contentWindow?.addEventListener('load', () => {
+      apply();
+      this.#suppressSave = false;
+    }, { once: true });
+    // Belt + braces: re-enable saves after a short timeout in case the
+    // load event never fires (e.g. cached SVG-in-spine docs).
+    setTimeout(() => { this.#suppressSave = false; }, 1500);
+  }
+
+  /**
+   * Persist current position. Throttled — caller-side scroll handlers
+   * fire every frame; we batch up to one save per ~500 ms.
+   */
+  #schedulePositionSave() {
+    if (this.#suppressSave || !this.#book || !this.#bookId) return;
+    if (this.#saveTimer) clearTimeout(this.#saveTimer);
+    this.#saveTimer = setTimeout(() => this.#savePositionNow(), 500);
+  }
+
+  async #savePositionNow() {
+    this.#saveTimer = null;
+    if (!this.#book || !this.#bookId) return;
+    const doc = this.#els.iframe.contentDocument;
+    const se = doc?.scrollingElement || doc?.documentElement;
+    let scrollFraction = 0;
+    if (se && this.#typography.layoutMode === 'scroll') {
+      const max = se.scrollHeight - se.clientHeight;
+      if (max > 0) scrollFraction = Math.min(1, Math.max(0, se.scrollTop / max));
+    }
+    /** @type {ReadingPosition} */
+    const record = {
+      id: this.#bookId,
+      spineIndex: this.#currentIndex,
+      scrollFraction,
+      updatedAt: Date.now(),
+    };
+    await dbPut('positions', record);
   }
 
   /** Unload the current book and revoke any blob URLs it created. */
@@ -647,6 +808,10 @@ export class EpubReaderElement extends HTMLElement {
       bubbles: true,
       composed: true,
     }));
+    // Persist immediately on chapter change (don't wait for the
+    // throttled scroll-pause save) so closing the tab mid-chapter
+    // resumes from the right place next time.
+    this.#schedulePositionSave();
   }
 
   /** @param {string} pathOrHref */
@@ -1149,8 +1314,9 @@ export class EpubReaderElement extends HTMLElement {
     update();
     // Vertical scroll (scroll mode) and horizontal scroll (paginated)
     // both fire the same event on the window.
-    win.addEventListener('scroll', update, { passive: true });
-    doc.body?.addEventListener('scroll', update, { passive: true });
+    const onScroll = () => { update(); this.#schedulePositionSave(); };
+    win.addEventListener('scroll', onScroll, { passive: true });
+    doc.body?.addEventListener('scroll', onScroll, { passive: true });
     // After subresources load, layout shifts; recompute once.
     win.addEventListener('load', update, { once: true });
   }
@@ -1180,6 +1346,8 @@ export class EpubReaderElement extends HTMLElement {
     e.sReadingWidth.addEventListener('input', () => update({ readingWidth: Number(e.sReadingWidth.value) }));
     e.sLayoutScroll.addEventListener('click', () => update({ layoutMode: 'scroll' }));
     e.sLayoutPaginated.addEventListener('click', () => update({ layoutMode: 'paginated' }));
+    // User CSS: re-apply on every keystroke (cheap — sanitiser runs in O(n)).
+    e.sUserCss.addEventListener('input', () => update({ userCss: e.sUserCss.value }));
     e.sReset.addEventListener('click', () => this.resetTypography());
     e.sClose.addEventListener('click', () => this.#toggleSettings(false));
 
@@ -1215,6 +1383,7 @@ export class EpubReaderElement extends HTMLElement {
     e.sLayoutPaginated.dataset.readerState = paginated ? 'active' : '';
     e.sLayoutScroll.setAttribute('aria-checked', String(!paginated));
     e.sLayoutPaginated.setAttribute('aria-checked', String(paginated));
+    if (e.sUserCss.value !== t.userCss) e.sUserCss.value = t.userCss;
   }
 
   #setOverlay(message, isError = false) {

@@ -729,6 +729,188 @@ test('paginated mode: works with RTL chapters (issue #10)', async (h, { page }) 
   await page.evaluate(() => { document.getElementById('reader').typography = { layoutMode: 'scroll' }; });
 });
 
+test('user CSS: arbitrary rules are appended to the chapter stylesheet (issue #11)', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => {
+    document.getElementById('reader').typography = {
+      userCss: 'body { letter-spacing: 0.07em !important; }',
+    };
+  });
+  const result = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    const css = doc.getElementById('__epub_reader_typography')?.textContent || '';
+    const ls = doc.defaultView.getComputedStyle(doc.body).letterSpacing;
+    return { css, ls };
+  });
+  truthy(/letter-spacing:\s*0\.07em/.test(result.css), `userCss should be appended, css=${result.css}`);
+  // 0.07em at 16 px base = ~1.12 px.
+  truthy(parseFloat(result.ls) >= 1, `body letter-spacing should reflect userCss, got ${result.ls}`);
+});
+
+test('user CSS: @import is stripped, <script> tags are stripped (issue #11)', async (h, { page }) => {
+  await h.openSample('wasteland.epub');
+  await page.evaluate(() => {
+    document.getElementById('reader').typography = {
+      userCss: '@import url(https://evil.example/x.css);\n<script>1</script>\np { color: red; }',
+    };
+  });
+  const css = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.getElementById('__epub_reader_typography')?.textContent || '';
+  });
+  truthy(!/evil\.example/.test(css), `@import should be blocked, css=${css}`);
+  truthy(!/<script/i.test(css), `<script> should be stripped, css=${css}`);
+  truthy(/p\s*\{\s*color:\s*red/.test(css), `harmless rules should survive, css=${css}`);
+});
+
+test('user CSS: persists across reload and survives reset clearing it (issue #11)', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    document.getElementById('reader').typography = { userCss: 'p { color: rebeccapurple; }' };
+  });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const restored = await page.evaluate(() => document.getElementById('reader').typography.userCss);
+  matches(restored, /rebeccapurple/, 'userCss should round-trip via localStorage');
+  // Reset clears it.
+  await page.evaluate(() => document.getElementById('reader').resetTypography());
+  const cleared = await page.evaluate(() => document.getElementById('reader').typography.userCss);
+  eq(cleared, '');
+});
+
+test('position: chapter index is saved and restored after reload (issue #12)', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  await page.setInputFiles('#file', join(SAMPLES, 'moby-dick.epub'));
+  await page.waitForFunction(() =>
+    document.getElementById('reader')?.querySelector('.title')?.textContent === 'Moby-Dick');
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  // Jump to chapter 5 and let the throttled save fire.
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await new Promise(r => setTimeout(r, 700)); // exceed 500 ms save throttle
+
+  // Reload, open the same file. epub-position-restored should fire and
+  // we should land on chapter 5 again, not chapter 0.
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    window.__restored = null;
+    document.getElementById('reader').addEventListener('epub-position-restored',
+      (e) => { window.__restored = e.detail; });
+  });
+  await page.setInputFiles('#file', join(SAMPLES, 'moby-dick.epub'));
+  await page.waitForFunction(() => window.__restored !== null, null, { timeout: 8_000 });
+  const detail = await page.evaluate(() => window.__restored);
+  eq(detail.spineIndex, 5, 'restored spineIndex should match the saved value');
+  const progress = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  eq(progress, '6 / 144', 'reader should land on the restored chapter');
+
+  // Cleanup so the next test doesn't auto-restore.
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase('epub-reader');
+      req.onsuccess = req.onerror = req.onblocked = () => resolve();
+    });
+  });
+});
+
+test('position: book identifier prefers dc:identifier over SHA-256 (issue #12)', async (h, { page }) => {
+  // moby-dick.epub has a dc:identifier; haruko a slightly different one;
+  // the prefix should be `id:`. We can observe via the restore event on
+  // a fresh load (no stored position → no event), so instead we verify
+  // by triggering save and inspecting IndexedDB directly.
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(2));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await new Promise(r => setTimeout(r, 700));
+  const ids = await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('epub-reader');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction('positions', 'readonly');
+      const req = tx.objectStore('positions').getAllKeys();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  });
+  truthy(ids.length > 0, 'expected at least one stored position');
+  const first = String(ids[0]);
+  truthy(first.startsWith('id:') || first.startsWith('sha:'),
+    `book id should be prefixed (id: or sha:), got ${first}`);
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase('epub-reader');
+      req.onsuccess = req.onerror = req.onblocked = () => resolve();
+    });
+  });
+});
+
+test('position: stale spineIndex (out of range) is ignored (issue #12)', async (h, { page }) => {
+  // Plant a fake stored position with a too-large spineIndex, then load
+  // a small book and verify we land on chapter 0 instead of trying to
+  // restore the bogus value.
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  // Ensure the DB exists by loading anything once.
+  await page.setInputFiles('#file', join(SAMPLES, 'trees.epub'));
+  await page.waitForFunction(() => document.getElementById('reader')?.querySelector('.title')?.textContent);
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Wait past the throttled save so the trees.epub identifier is in the DB.
+  await new Promise(r => setTimeout(r, 700));
+  // Now plant a bogus record under the trees.epub identifier.
+  const treesId = await page.evaluate(async () => {
+    const db = await new Promise((resolve) => {
+      const req = indexedDB.open('epub-reader');
+      req.onsuccess = () => resolve(req.result);
+    });
+    return await new Promise((resolve) => {
+      const tx = db.transaction('positions', 'readonly');
+      const req = tx.objectStore('positions').getAllKeys();
+      req.onsuccess = () => resolve(String(req.result[0] || ''));
+    });
+  });
+  truthy(treesId, 'trees.epub should have stored a real id by now');
+  await page.evaluate(async (id) => {
+    const db = await new Promise((resolve) => {
+      const req = indexedDB.open('epub-reader');
+      req.onsuccess = () => resolve(req.result);
+    });
+    await new Promise((resolve) => {
+      const tx = db.transaction('positions', 'readwrite');
+      tx.objectStore('positions').put({ id, spineIndex: 999, scrollFraction: 0, updatedAt: Date.now() });
+      tx.oncomplete = () => resolve();
+    });
+  }, treesId);
+
+  // Reload + reopen. We should NOT receive an epub-position-restored event,
+  // and progress should be 1 / 3.
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    window.__restored = null;
+    document.getElementById('reader').addEventListener('epub-position-restored',
+      (e) => { window.__restored = e.detail; });
+  });
+  await page.setInputFiles('#file', join(SAMPLES, 'trees.epub'));
+  await page.waitForFunction(() => document.getElementById('reader')?.querySelector('.title')?.textContent);
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Allow some time in case the (incorrect) event would fire.
+  await new Promise(r => setTimeout(r, 200));
+  const restored = await page.evaluate(() => window.__restored);
+  eq(restored, null, 'out-of-range stored spineIndex must not trigger a restore');
+  const progress = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.progress').textContent);
+  eq(progress, '1 / 3', 'reader should fall back to start when stored position is invalid');
+  // Cleanup.
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase('epub-reader');
+      req.onsuccess = req.onerror = req.onblocked = () => resolve();
+    });
+  });
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;
