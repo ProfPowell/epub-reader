@@ -5,8 +5,8 @@
 // doesn't persist for that session.
 
 const DB_NAME = 'epub-reader';
-const DB_VERSION = 2;
-const STORES = /** @type {const} */ (['positions', 'bookmarks', 'library']);
+const DB_VERSION = 3;
+const STORES = /** @type {const} */ (['positions', 'bookmarks', 'library', 'highlights']);
 
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null;

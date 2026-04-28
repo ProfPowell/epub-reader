@@ -117,6 +117,23 @@ export interface EpubBookmarksChangeDetail {
   bookmarks: Bookmark[];
 }
 
+/** One user highlight within a book. */
+export interface Highlight {
+  id: string;
+  spineIndex: number;
+  startOffset: number;
+  endOffset: number;
+  text: string;
+  color: string;
+  note: string;
+  createdAt: number;
+}
+
+/** Detail payload for the `epub-highlights-change` event. */
+export interface EpubHighlightsChangeDetail {
+  highlights: Highlight[];
+}
+
 /** One stored library entry — the bytes plus the metadata to render a card. */
 export interface LibraryEntry {
   id: string;
@@ -128,6 +145,20 @@ export interface LibraryEntry {
   size: number;
   addedAt: number;
   lastOpenedAt: number;
+}
+
+/** One full-text search hit. */
+export interface SearchHit {
+  spineIndex: number;
+  path: string;
+  title: string;
+  /** Char offset into the chapter's normalised plain text. */
+  offset: number;
+  contextBefore: string;
+  match: string;
+  contextAfter: string;
+  /** 0-based index of this match within its chapter. */
+  matchOrdinal: number;
 }
 
 /** Detail payload for the `epub-library-change` event. */
@@ -146,6 +177,7 @@ export interface EpubReaderEventMap {
   'epub-typography-change':   CustomEvent<EpubTypographyChangeDetail>;
   'epub-position-restored':   CustomEvent<EpubPositionRestoredDetail>;
   'epub-bookmarks-change':    CustomEvent<EpubBookmarksChangeDetail>;
+  'epub-highlights-change':   CustomEvent<EpubHighlightsChangeDetail>;
   'epub-library-change':      CustomEvent<EpubLibraryChangeDetail>;
 }
 
@@ -214,6 +246,15 @@ export class EpubReaderElement extends HTMLElement {
   /** Jump to a bookmark (chapter + scroll position). */
   goToBookmark(id: string): Promise<void>;
 
+  /** Read-only snapshot of the current book's highlights. */
+  readonly highlights: Highlight[];
+
+  /** Remove a highlight by id. Resolves true if a highlight was removed. */
+  removeHighlight(id: string): Promise<boolean>;
+
+  /** Jump to a stored highlight (chapter + scroll into the wrapper). */
+  goToHighlight(id: string): Promise<void>;
+
   /**
    * Snapshot of all stored library entries, sorted by most recently
    * opened first. Each entry is a clone — mutating it has no effect.
@@ -234,6 +275,20 @@ export class EpubReaderElement extends HTMLElement {
    * don't implement `navigator.storage.estimate()`.
    */
   getStorageEstimate(): Promise<{ usage: number; quota: number; percent: number } | null>;
+
+  /**
+   * Full-text search across the open book. Returns hits with
+   * surrounding context. The first call lazily indexes every
+   * reflowable chapter; later calls are instant. Empty query (or <2
+   * chars) returns `[]`.
+   */
+  search(query: string, opts?: { maxHits?: number }): Promise<SearchHit[]>;
+
+  /** One full-text search hit, suitable for rendering. */
+  // (declared above; here only as a forward reference.)
+
+  /** Open or close the in-chapter find bar. */
+  find(open: boolean): void;
 
   // Theming is delegated to the host page's Vanilla Breeze theme
   // engine. The reader reads `--color-background`, `--color-text`,

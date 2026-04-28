@@ -827,7 +827,7 @@ test('position: book identifier prefers dc:identifier over SHA-256 (issue #12)',
   // a fresh load (no stored position → no event), so instead we verify
   // by triggering save and inspecting IndexedDB directly.
   await h.openSample('moby-dick.epub');
-  await page.evaluate(() => document.getElementById('reader').goToIndex(2));
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
   await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
   await new Promise(r => setTimeout(r, 700));
   const ids = await page.evaluate(async () => {
@@ -1147,6 +1147,379 @@ test('library: getStorageEstimate reports usage/quota (issue #14)', async (h, { 
   truthy(typeof est.usage === 'number' && est.usage >= 0, 'usage should be a number');
   truthy(typeof est.quota === 'number' && est.quota > 0, 'quota should be > 0');
   truthy(est.percent >= 0 && est.percent <= 100, `percent should be 0..100, got ${est.percent}`);
+});
+
+test('find: Ctrl+F opens the find bar (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Dispatch Ctrl+F on the host.
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'f', ctrlKey: true, bubbles: true }));
+  });
+  const open = await page.evaluate(() =>
+    !document.getElementById('reader').querySelector('.find-bar').hidden);
+  eq(open, true, 'Ctrl+F should open the find bar');
+});
+
+test('find: typing highlights matches and shows count (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => document.getElementById('reader').find(true));
+
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.value = 'the';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const c = document.getElementById('reader').querySelector('.find-count').textContent;
+    return /^\d+ \/ \d+$/.test(c) && Number(c.split('/')[1].trim()) > 0;
+  }, null, { timeout: 5_000 });
+  const stats = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      count: r.querySelector('.find-count').textContent,
+      marks: doc.querySelectorAll('[data-reader-mark="find"]').length,
+      currentMarks: doc.querySelectorAll('[data-reader-mark="find"].current').length,
+    };
+  });
+  matches(stats.count, /^1 \/ [1-9]\d*$/, `expected "1 / N", got ${stats.count}`);
+  truthy(stats.marks > 0, 'expected at least one find mark in the chapter');
+  truthy(stats.currentMarks >= 1, 'expected exactly the first match to be .current');
+  await page.evaluate(() => document.getElementById('reader').find(false));
+});
+
+test('find: Enter cycles forward, Shift+Enter cycles backward (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => document.getElementById('reader').find(true));
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.value = 'the';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const c = document.getElementById('reader').querySelector('.find-count').textContent;
+    return /^1 \/ \d+$/.test(c);
+  });
+  // Step forward twice, back once → at "2 / N".
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+  });
+  const count = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.find-count').textContent);
+  matches(count, /^2 \/ /, `expected "2 / N" after +/+/-, got ${count}`);
+  await page.evaluate(() => document.getElementById('reader').find(false));
+});
+
+test('find: Escape closes and clears marks (issue #17)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.evaluate(() => document.getElementById('reader').find(true));
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.find-input');
+    el.value = 'the';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="find"]').length > 0;
+  });
+  await page.evaluate(() => {
+    document.getElementById('reader').dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'Escape', bubbles: true }));
+  });
+  const after = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      barHidden: r.querySelector('.find-bar').hidden,
+      marks: doc.querySelectorAll('[data-reader-mark="find"]').length,
+    };
+  });
+  eq(after.barHidden, true, 'Esc should close the find bar');
+  eq(after.marks, 0, 'Esc should clear find marks');
+});
+
+test('search: returns hits across multiple chapters with context (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  const hits = await page.evaluate(() => document.getElementById('reader').search('whale', { maxHits: 50 }));
+  truthy(hits.length > 5, `expected several hits, got ${hits.length}`);
+  const chapters = new Set(hits.map(hit => hit.spineIndex));
+  truthy(chapters.size > 1, `hits should span chapters, only saw ${[...chapters].join(',')}`);
+  // Each hit carries enough to render a card.
+  const sample = hits[0];
+  truthy(typeof sample.title === 'string' && sample.title.length > 0, 'hit.title');
+  matches(sample.match, /whale/i);
+  truthy(sample.contextBefore !== undefined && sample.contextAfter !== undefined,
+    'hit should carry surrounding context strings');
+});
+
+test('search: too-short query returns no hits (issue #16)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const empty = await page.evaluate(() => document.getElementById('reader').search('a'));
+  eq(empty.length, 0, 'queries shorter than 2 chars must return []');
+});
+
+test('search: panel renders results grouped by chapter (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.click('.search-toggle');
+  await page.waitForFunction(() => !document.getElementById('reader').querySelector('.search-panel').hidden);
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.search-input');
+    el.value = 'whale';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return r.querySelectorAll('.search-results li').length > 0;
+  }, null, { timeout: 30_000 });
+  const summary = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return {
+      results: r.querySelectorAll('.search-results li').length,
+      status:  r.querySelector('.srch-status').textContent,
+      firstChapter: r.querySelector('.search-results .srch-chap')?.textContent || '',
+      firstSnippetMark: r.querySelector('.search-results .srch-snippet mark')?.textContent || '',
+    };
+  });
+  truthy(summary.results > 5, `expected multiple results, got ${summary.results}`);
+  matches(summary.status, /\d+ result/, `status should report counts, got ${summary.status}`);
+  matches(summary.firstSnippetMark, /whale/i, 'snippet should highlight the matched term');
+});
+
+test('search: clicking a hit jumps to the chapter and highlights matches (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.click('.search-toggle');
+  await page.evaluate(() => {
+    const el = document.getElementById('reader').querySelector('.search-input');
+    el.value = 'whale';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return r.querySelectorAll('.search-results li').length > 0;
+  }, null, { timeout: 30_000 });
+
+  // Capture the destination chapter title before clicking.
+  const targetTitle = await page.evaluate(() =>
+    document.getElementById('reader').querySelector('.search-results .srch-chap').textContent.trim());
+  // Click the first hit. Wait for the panel to close + the chapter to render.
+  await page.click('.search-results li:first-child .srch-jump');
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    if (!r.querySelector('.search-panel').hidden) return false;
+    const doc = r.querySelector('iframe').contentDocument;
+    return doc?.querySelectorAll('[data-reader-mark="search"]').length > 0;
+  }, null, { timeout: 8_000 });
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      title: r.querySelector('.title').textContent,
+      marks: doc.querySelectorAll('[data-reader-mark="search"]').length,
+    };
+  });
+  truthy(state.marks > 0, 'destination chapter should have search marks');
+  truthy(targetTitle.length > 0, 'a chapter title was rendered');
+});
+
+test('search: closing the book clears the index + highlights (issue #16)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').search('whale'));
+  await page.evaluate(() => document.getElementById('reader').close());
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return {
+      panelHidden: r.querySelector('.search-panel').hidden,
+      input: r.querySelector('.search-input').value,
+      results: r.querySelectorAll('.search-results li').length,
+    };
+  });
+  eq(state.panelHidden, true);
+  eq(state.input, '');
+  eq(state.results, 0);
+});
+
+test('highlights: programmatic add via selection works (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  // Make a selection inside the iframe of the first ~50 chars.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) {
+      if (t.data && t.data.trim().length > 20) break;
+    }
+    const range = doc.createRange();
+    range.setStart(t, 0);
+    range.setEnd(t, Math.min(t.data.length, 30));
+    const sel = win.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    // Trigger the popover's selection refresh.
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  // The popover should be visible.
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden,
+    null, { timeout: 3_000 });
+  // Click the yellow swatch.
+  await page.click('.hl-popover .hl-color[data-color="#fde68a"]');
+  // Verify a highlight mark exists in the chapter, and the public list
+  // reports one item.
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length > 0;
+  }, null, { timeout: 3_000 });
+  const list = await page.evaluate(() => document.getElementById('reader').highlights);
+  eq(list.length, 1, 'expected one persisted highlight');
+  eq(list[0].color, '#fde68a');
+  truthy(list[0].text.length > 0);
+  // Cleanup
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('highlights: re-applied when chapter reloads (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Simulate a saved highlight by dispatching a selection + colour click.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) { if (t.data && t.data.trim().length > 20) break; }
+    const range = doc.createRange();
+    range.setStart(t, 0); range.setEnd(t, 25);
+    win.getSelection().removeAllRanges();
+    win.getSelection().addRange(range);
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden);
+  await page.click('.hl-popover .hl-color[data-color="#bbf7d0"]');
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length > 0;
+  });
+
+  // Navigate away and back — highlight wrapper should reappear.
+  await page.evaluate(() => document.getElementById('reader').goToIndex(6));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  const onAwayMarks = await page.evaluate(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length;
+  });
+  eq(onAwayMarks, 0, 'no highlights expected on a different chapter');
+
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    return doc.querySelectorAll('[data-reader-mark="highlight"]').length > 0;
+  }, null, { timeout: 5_000 });
+  // Cleanup
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('highlights: removeHighlight clears the in-memory list + chapter mark (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) { if (t.data && t.data.trim().length > 30) break; }
+    const r = doc.createRange();
+    r.setStart(t, 0); r.setEnd(t, 25);
+    win.getSelection().removeAllRanges();
+    win.getSelection().addRange(r);
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden);
+  await page.click('.hl-popover .hl-color[data-color="#fde68a"]');
+  await page.waitForFunction(() =>
+    document.getElementById('reader').highlights.length === 1, null, { timeout: 5_000 });
+
+  // Now remove it. Both the array and the chapter mark must go.
+  const id = await page.evaluate(() => document.getElementById('reader').highlights[0].id);
+  await page.evaluate((id) => document.getElementById('reader').removeHighlight(id), id);
+  const state = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const doc = r.querySelector('iframe').contentDocument;
+    return {
+      list: r.highlights.length,
+      marks: doc.querySelectorAll('[data-reader-mark="highlight"]').length,
+    };
+  });
+  eq(state.list, 0, 'removed highlight should leave list empty');
+  eq(state.marks, 0, 'removed highlight should drop its <mark> wrapper');
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('highlights: panel renders entries and click jumps to the chapter (issue #15)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // Add a highlight.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('reader').querySelector('iframe');
+    const doc = iframe.contentDocument;
+    const win = iframe.contentWindow;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) { if (t.data && t.data.trim().length > 30) break; }
+    const r = doc.createRange();
+    r.setStart(t, 0); r.setEnd(t, 25);
+    win.getSelection().removeAllRanges();
+    win.getSelection().addRange(r);
+    doc.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.hl-popover').hidden);
+  await page.click('.hl-popover .hl-color[data-color="#fbcfe8"]');
+  await page.waitForFunction(() => document.getElementById('reader').highlights.length === 1);
+
+  // Navigate elsewhere, then open panel and click the entry → land back here.
+  await page.evaluate(() => document.getElementById('reader').goToIndex(0));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  await page.click('.highlights-toggle');
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.highlights-panel').hidden &&
+    document.getElementById('reader').querySelectorAll('.hl-list li').length === 1);
+  await page.click('.hl-list .hl-jump');
+  await page.waitForFunction(() => {
+    return document.getElementById('reader').querySelector('.progress').textContent === '6 / 144';
+  }, null, { timeout: 8_000 });
+  // Cleanup
+  await page.evaluate(() => document.getElementById('reader').clearLibrary());
 });
 
 // ---------- runner ----------
