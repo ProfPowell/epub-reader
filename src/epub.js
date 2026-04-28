@@ -101,6 +101,15 @@ export class EpubBook {
   /** @type {Map<string, Promise<string>>} */        #pending  = new Map();
   /** @type {Blob | null} */                         #source = null;
   /** @type {string | null} */                       #cachedBookId = null;
+  /**
+   * Map of obfuscated resource path → algorithm. Populated from
+   * META-INF/encryption.xml during load(). EPUB allows two
+   * font-obfuscation algorithms in the wild — IDPF and Adobe — and
+   * we de-obfuscate at resourceUrl() time.
+   *
+   * @type {Map<string, 'idpf' | 'adobe'>}
+   */
+  #obfuscation = new Map();
 
   /**
    * @param {ZipArchive} zip
@@ -133,25 +142,131 @@ export class EpubBook {
     return (this.#cachedBookId = `sha:${hex}`);
   }
 
+  /**
+   * Reverse one of the two EPUB font-obfuscation schemes. Both schemes
+   * are simple XOR over a prefix of the file with a derived key:
+   *
+   * - IDPF (http://www.idpf.org/2008/embedding):
+   *     key = SHA-1 of the whitespace-normalised dc:identifier; first
+   *     1040 bytes are XORed with the 20-byte key, repeating.
+   *
+   * - Adobe (http://ns.adobe.com/pdf/enc#RC):
+   *     key = the 16 raw bytes from the dc:identifier formatted as a
+   *     UUID (hex digits parsed pair-wise); first 1024 bytes XORed.
+   *
+   * Beyond the prefix, the file is the original font bytes. We return
+   * a fresh buffer rather than mutating the input.
+   *
+   * @param {Uint8Array} bytes
+   * @param {'idpf' | 'adobe'} scheme
+   * @returns {Promise<Uint8Array>}
+   */
+  async #deobfuscate(bytes, scheme) {
+    const id = (this.#metadata.identifier || '').trim();
+    if (!id) return bytes;
+    const out = new Uint8Array(bytes.length);
+    out.set(bytes);
+    if (scheme === 'idpf') {
+      const norm = id.replace(/\s+/g, '');
+      const digest = await crypto.subtle.digest('SHA-1',
+        new TextEncoder().encode(norm));
+      const key = new Uint8Array(digest);
+      const n = Math.min(1040, out.length);
+      for (let i = 0; i < n; i++) out[i] ^= key[i % key.length];
+    } else if (scheme === 'adobe') {
+      const hex = id.replace(/[^0-9a-f]/gi, '').slice(0, 32);
+      if (hex.length < 32) return bytes;
+      const key = new Uint8Array(16);
+      for (let i = 0; i < 16; i++) key[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      const n = Math.min(1024, out.length);
+      for (let i = 0; i < n; i++) out[i] ^= key[i % key.length];
+    }
+    return out;
+  }
+
   async load() {
+    // Validate the EPUB envelope. The spec requires `mimetype` to be
+    // the first archive entry, stored uncompressed, with the literal
+    // string `application/epub+zip`. We accept either order so we don't
+    // reject mostly-valid books, but we do require the right contents.
+    if (this.#zip.has('mimetype')) {
+      const mt = (await this.#zip.readText('mimetype')).trim();
+      if (mt && mt !== 'application/epub+zip') {
+        throw new Error(`Not an EPUB: mimetype is "${mt}", expected "application/epub+zip"`);
+      }
+    } else {
+      // Some bad EPUBs omit the mimetype entry entirely. That's a
+      // soft warning rather than a hard fail — the rest of the
+      // structure can still be valid.
+      console.warn('EPUB: missing top-level mimetype entry');
+    }
+
     if (!this.#zip.has(CONTAINER_PATH)) {
       throw new Error('Not a valid EPUB: missing META-INF/container.xml');
     }
-    const containerXml = await this.#zip.readText(CONTAINER_PATH);
-    const containerDoc = parseXml(containerXml, 'application/xml');
+    let containerDoc;
+    try {
+      containerDoc = parseXml(await this.#zip.readText(CONTAINER_PATH), 'application/xml');
+    } catch (err) {
+      throw new Error(`Malformed META-INF/container.xml: ${err?.message || err}`);
+    }
     const rootfile = containerDoc.getElementsByTagName('rootfile')[0];
     if (!rootfile) throw new Error('container.xml: no <rootfile> element');
     const fullPath = rootfile.getAttribute('full-path');
     if (!fullPath) throw new Error('container.xml: rootfile missing full-path');
+    if (!this.#zip.has(fullPath)) {
+      throw new Error(`OPF package file not found in archive: ${fullPath}`);
+    }
     this.#opfPath = fullPath;
     this.#opfDir = dirname(this.#opfPath);
 
-    const opfXml = await this.#zip.readText(this.#opfPath);
-    const opfDoc = parseXml(opfXml, 'application/xml');
+    let opfDoc;
+    try {
+      opfDoc = parseXml(await this.#zip.readText(this.#opfPath), 'application/xml');
+    } catch (err) {
+      throw new Error(`Malformed OPF (${this.#opfPath}): ${err?.message || err}`);
+    }
     this.#parseMetadata(opfDoc);
     this.#parseManifest(opfDoc);
     this.#parseSpine(opfDoc);
     await this.#parseNav();
+    await this.#parseEncryption();
+  }
+
+  /**
+   * Parse META-INF/encryption.xml (when present) and record which
+   * resources are obfuscated and by which algorithm. EPUB recognises
+   * two font-obfuscation schemes:
+   *
+   *   IDPF:  http://www.idpf.org/2008/embedding
+   *   Adobe: http://ns.adobe.com/pdf/enc#RC
+   *
+   * Anything else (real DRM, etc.) is left alone — the resource will
+   * load as-is; if it's a font the user will see the wrong glyphs but
+   * the rest of the book still works.
+   */
+  async #parseEncryption() {
+    const path = 'META-INF/encryption.xml';
+    if (!this.#zip.has(path)) return;
+    let doc;
+    try { doc = parseXml(await this.#zip.readText(path), 'application/xml'); }
+    catch { return; }
+    const datas = doc.getElementsByTagNameNS('*', 'EncryptedData');
+    for (const data of datas) {
+      const method = data.getElementsByTagNameNS('*', 'EncryptionMethod')[0];
+      const cipher = data.getElementsByTagNameNS('*', 'CipherReference')[0];
+      const algo = method?.getAttribute('Algorithm') || '';
+      const uri = cipher?.getAttribute('URI') || '';
+      if (!algo || !uri) continue;
+      let scheme;
+      if (algo === 'http://www.idpf.org/2008/embedding') scheme = 'idpf';
+      else if (algo === 'http://ns.adobe.com/pdf/enc#RC') scheme = 'adobe';
+      else continue;
+      let target;
+      try { target = decodeURIComponent(uri); } catch { target = uri; }
+      // encryption.xml URIs are relative to the archive root.
+      this.#obfuscation.set(target, /** @type {'idpf' | 'adobe'} */ (scheme));
+    }
   }
 
   /** @returns {EpubMetadata} */
@@ -205,6 +320,11 @@ export class EpubBook {
       if (!id || !href) continue;
       const resolved = resolveRelative(this.#opfPath, href);
       if (!resolved) continue;
+      // Warn (don't fail) if the manifest references a missing file.
+      // The book stays usable for the chapters that DO exist.
+      if (!this.#zip.has(resolved.path)) {
+        console.warn(`OPF: manifest item "${id}" → "${resolved.path}" not found in archive`);
+      }
       const entry = { id, href, path: resolved.path, mediaType, properties };
       this.#manifest.set(id, entry);
       if (properties.split(/\s+/).includes('nav')) this.#navId = id;
@@ -237,7 +357,10 @@ export class EpubBook {
       const idref = ref.getAttribute('idref');
       if (!idref) continue;
       const item = this.#manifest.get(idref);
-      if (!item) continue;
+      if (!item) {
+        console.warn(`OPF: spine itemref "${idref}" doesn't match any manifest item`);
+        continue;
+      }
       const linear = (ref.getAttribute('linear') || 'yes') !== 'no';
       // Per-itemref override via properties tokens.
       const refProps = (ref.getAttribute('properties') || '').split(/\s+/);
@@ -363,7 +486,9 @@ export class EpubBook {
       } else if (isCssType(mediaType)) {
         blob = await this.#processCss(path);
       } else {
-        const bytes = await this.#zip.read(path);
+        let bytes = await this.#zip.read(path);
+        const scheme = this.#obfuscation.get(path);
+        if (scheme) bytes = await this.#deobfuscate(bytes, scheme);
         blob = new Blob([/** @type {BlobPart} */ (bytes)], { type: mediaType });
       }
       const url = URL.createObjectURL(blob);

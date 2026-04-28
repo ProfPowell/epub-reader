@@ -1,6 +1,6 @@
 // Minimal ZIP reader using DecompressionStream for DEFLATE.
-// Supports: stored (0) and deflate (8). No ZIP64, no encryption.
-// Enough for nearly every EPUB in the wild.
+// Supports: stored (0) and deflate (8). ZIP64 archives (>4 GB or
+// >65 535 entries) are handled. No encryption.
 
 /**
  * @typedef {object} ZipEntry
@@ -12,9 +12,11 @@
  * @property {number} localHeader       Byte offset of the local file header.
  */
 
-const SIG_EOCD = 0x06054b50;
-const SIG_CDH  = 0x02014b50;
-const SIG_LFH  = 0x04034b50;
+const SIG_EOCD       = 0x06054b50;
+const SIG_CDH        = 0x02014b50;
+const SIG_LFH        = 0x04034b50;
+const SIG_ZIP64_LOC  = 0x07064b50; // ZIP64 EOCD locator
+const SIG_ZIP64_EOCD = 0x06064b50; // ZIP64 EOCD record
 
 const MAX_COMMENT = 0xffff;
 const EOCD_MIN = 22;
@@ -90,12 +92,30 @@ export class ZipArchive {
     const bytes = this.#bytes;
     const eocd = this.#findEOCD();
 
-    const totalEntries = view.getUint16(eocd + 10, true);
-    const cdSize = view.getUint32(eocd + 12, true);
-    const cdOffset = view.getUint32(eocd + 16, true);
+    let totalEntries = view.getUint16(eocd + 10, true);
+    let cdSize       = view.getUint32(eocd + 12, true);
+    let cdOffset     = view.getUint32(eocd + 16, true);
 
+    // ZIP64 promotion: any field at its 32-bit/16-bit sentinel means
+    // the real value lives in the ZIP64 EOCD record.
     if (cdOffset === 0xffffffff || cdSize === 0xffffffff || totalEntries === 0xffff) {
-      throw new Error('ZIP64 archives are not supported');
+      const z64 = this.#findZip64EOCD(eocd);
+      if (z64 < 0) throw new Error('ZIP64 fields signalled but no ZIP64 EOCD record found');
+      // ZIP64 EOCD layout at z64:
+      //  +0  signature (4)        +4  size of record (8)
+      //  +12 version made (2)     +14 version needed (2)
+      //  +16 disk# (4)            +20 disk# w/CD (4)
+      //  +24 entries on disk (8)  +32 total entries (8)
+      //  +40 CD size (8)          +48 CD offset (8)
+      const total64 = readBigU64(view, z64 + 32);
+      const size64  = readBigU64(view, z64 + 40);
+      const off64   = readBigU64(view, z64 + 48);
+      if (total64 > Number.MAX_SAFE_INTEGER || size64 > Number.MAX_SAFE_INTEGER || off64 > Number.MAX_SAFE_INTEGER) {
+        throw new Error('ZIP64 archive exceeds Number.MAX_SAFE_INTEGER');
+      }
+      totalEntries = Number(total64);
+      cdSize       = Number(size64);
+      cdOffset     = Number(off64);
     }
 
     let p = cdOffset;
@@ -108,15 +128,26 @@ export class ZipArchive {
       const flags            = view.getUint16(p + 8, true);
       const method           = view.getUint16(p + 10, true);
       const crc32            = view.getUint32(p + 16, true);
-      const compressedSize   = view.getUint32(p + 20, true);
-      const uncompressedSize = view.getUint32(p + 24, true);
+      let   compressedSize   = view.getUint32(p + 20, true);
+      let   uncompressedSize = view.getUint32(p + 24, true);
       const nameLen          = view.getUint16(p + 28, true);
       const extraLen         = view.getUint16(p + 30, true);
       const commentLen       = view.getUint16(p + 32, true);
-      const localHeader      = view.getUint32(p + 42, true);
+      let   localHeader      = view.getUint32(p + 42, true);
 
       const nameBytes = bytes.subarray(p + 46, p + 46 + nameLen);
       const name = decodeName(nameBytes, flags);
+
+      // Promote sentinels from the ZIP64 extra field (id 0x0001).
+      if (uncompressedSize === 0xffffffff || compressedSize === 0xffffffff || localHeader === 0xffffffff) {
+        const z64 = readZip64Extra(view, p + 46 + nameLen, extraLen,
+          uncompressedSize === 0xffffffff,
+          compressedSize === 0xffffffff,
+          localHeader === 0xffffffff);
+        if (z64.uncompressedSize !== undefined) uncompressedSize = z64.uncompressedSize;
+        if (z64.compressedSize   !== undefined) compressedSize   = z64.compressedSize;
+        if (z64.localHeader      !== undefined) localHeader      = z64.localHeader;
+      }
 
       this.#entries.set(name, {
         name,
@@ -129,6 +160,26 @@ export class ZipArchive {
 
       p += 46 + nameLen + extraLen + commentLen;
     }
+  }
+
+  /**
+   * Locate the ZIP64 EOCD record. The ZIP64 locator sits 20 bytes
+   * before the regular EOCD; it points to the ZIP64 EOCD record
+   * itself.
+   * @param {number} eocd  Byte offset of the regular EOCD.
+   * @returns {number}     Offset of the ZIP64 EOCD record, or -1.
+   */
+  #findZip64EOCD(eocd) {
+    const view = this.#view;
+    const locator = eocd - 20;
+    if (locator < 0) return -1;
+    if (view.getUint32(locator, true) !== SIG_ZIP64_LOC) return -1;
+    const off = readBigU64(view, locator + 8);
+    if (off > Number.MAX_SAFE_INTEGER) return -1;
+    const recAt = Number(off);
+    if (recAt < 0 || recAt + 4 > view.byteLength) return -1;
+    if (view.getUint32(recAt, true) !== SIG_ZIP64_EOCD) return -1;
+    return recAt;
   }
 
   /** @param {ZipEntry} entry */
@@ -207,6 +258,65 @@ function decodeName(bytes, flags) {
  * @param {Uint8Array} bytes
  * @returns {Promise<Uint8Array>}
  */
+/**
+ * Read an 8-byte little-endian unsigned integer as a BigInt.
+ * @param {DataView} view
+ * @param {number} at
+ * @returns {bigint}
+ */
+function readBigU64(view, at) {
+  const lo = BigInt(view.getUint32(at,     true));
+  const hi = BigInt(view.getUint32(at + 4, true));
+  return lo | (hi << 32n);
+}
+
+/**
+ * Walk the extra-field area of a CD entry looking for a 0x0001
+ * (ZIP64) record and return the 64-bit values for whichever fields
+ * the caller asked for. Fields appear in the order
+ * uncompressedSize, compressedSize, localHeader, diskNumber — but
+ * only those whose 32-bit equivalents are sentinels are present, so
+ * the caller tells us which ones to read.
+ *
+ * @param {DataView} view
+ * @param {number} start    Byte offset of the extra-field block.
+ * @param {number} length   Length of the extra-field block.
+ * @param {boolean} wantUncompressed
+ * @param {boolean} wantCompressed
+ * @param {boolean} wantLocalHeader
+ * @returns {{uncompressedSize?: number, compressedSize?: number, localHeader?: number}}
+ */
+function readZip64Extra(view, start, length, wantUncompressed, wantCompressed, wantLocalHeader) {
+  const end = start + length;
+  /** @type {{uncompressedSize?: number, compressedSize?: number, localHeader?: number}} */
+  const out = {};
+  let p = start;
+  while (p + 4 <= end) {
+    const id   = view.getUint16(p, true);
+    const len  = view.getUint16(p + 2, true);
+    const next = p + 4 + len;
+    if (id === 0x0001) {
+      let q = p + 4;
+      const take = () => { const v = readBigU64(view, q); q += 8; return v; };
+      if (wantUncompressed && q + 8 <= next) {
+        const v = take();
+        if (v <= BigInt(Number.MAX_SAFE_INTEGER)) out.uncompressedSize = Number(v);
+      }
+      if (wantCompressed && q + 8 <= next) {
+        const v = take();
+        if (v <= BigInt(Number.MAX_SAFE_INTEGER)) out.compressedSize = Number(v);
+      }
+      if (wantLocalHeader && q + 8 <= next) {
+        const v = take();
+        if (v <= BigInt(Number.MAX_SAFE_INTEGER)) out.localHeader = Number(v);
+      }
+      break;
+    }
+    p = next;
+  }
+  return out;
+}
+
 async function inflateRaw(bytes) {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('DecompressionStream is not available in this environment');

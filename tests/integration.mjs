@@ -1399,6 +1399,21 @@ test('highlights: re-applied when chapter reloads (issue #15)', async (h, { page
   await h.openSample('moby-dick.epub');
   await page.evaluate(() => document.getElementById('reader').goToIndex(5));
   await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  // The iframe may transition between waitChapter resolving and the
+  // following evaluate firing. Wait for both `body.children > 0` AND
+  // a long-enough text node to be present, in the same tick that we
+  // capture the selection — eliminates the race.
+  await page.waitForFunction(() => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    if (!doc?.body) return false;
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    /** @type {Text | null} */
+    let t;
+    while ((t = walker.nextNode())) {
+      if (t.data && t.data.trim().length > 20) return true;
+    }
+    return false;
+  }, null, { timeout: 8_000 });
   // Simulate a saved highlight by dispatching a selection + colour click.
   await page.evaluate(() => {
     const iframe = document.getElementById('reader').querySelector('iframe');
@@ -1520,6 +1535,139 @@ test('highlights: panel renders entries and click jumps to the chapter (issue #1
   }, null, { timeout: 8_000 });
   // Cleanup
   await page.evaluate(() => document.getElementById('reader').clearLibrary());
+});
+
+test('robustness: obfuscated OTF font is decoded back to its OTTO/0x0001 magic (issue #21)', async (h, { page }) => {
+  // wasteland-otf-obf.epub uses IDPF font obfuscation. The resourceUrl()
+  // path applies de-obfuscation before exposing the blob — fetch the
+  // manifest's font resource and verify the magic bytes match a real
+  // OpenType signature.
+  await h.openSample('wasteland-otf-obf.epub');
+  const magic = await page.evaluate(async () => {
+    const doc = document.getElementById('reader').querySelector('iframe').contentDocument;
+    // Walk every stylesheet in the chapter — including the ones reached
+    // via @import — and collect the first blob: URL referenced via
+    // url(...) (font references end up here after our rewriting).
+    /** @type {Set<string>} */
+    const seen = new Set();
+    /** @type {string[]} */
+    const blobUrls = [];
+    /** @param {CSSStyleSheet} sheet */
+    const walk = (sheet) => {
+      if (!sheet || seen.has(sheet.href || '')) return;
+      seen.add(sheet.href || '');
+      let rules;
+      try { rules = sheet.cssRules; } catch { return; }
+      for (const rule of rules || []) {
+        if (rule.constructor.name === 'CSSImportRule') walk(/** @type {any} */ (rule).styleSheet);
+        const src = (rule.cssText || '');
+        const m = src.match(/url\(["']?(blob:[^"')]+)/);
+        if (m && !blobUrls.includes(m[1])) blobUrls.push(m[1]);
+      }
+    };
+    for (const ss of doc.styleSheets) walk(ss);
+    if (blobUrls.length === 0) return null;
+    // The OTF/WOFF magic only appears at offset 0 of the actual font
+    // file. CSS may reference both stylesheets (via @import) and the
+    // font itself; check each blob until we find a recognisable one.
+    for (const url of blobUrls) {
+      const res = await fetch(url);
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength < 4) continue;
+      const b = new Uint8Array(buf, 0, 4);
+      const hex = Array.from(b).map(x => x.toString(16).padStart(2, '0')).join(' ');
+      if (hex === '4f 54 54 4f' || hex === '00 01 00 00' || hex === '77 4f 46 46') {
+        return hex;
+      }
+    }
+    return null;
+  });
+  truthy(magic, 'expected to find an OTF/WOFF magic byte sequence in the chapter blob URLs');
+  // OpenType: 'OTTO' = '4f 54 54 4f', or version 1.0 = '00 01 00 00';
+  // WOFF: '77 4f 46 46'. Any of those indicates we de-obfuscated.
+  matches(magic, /^(4f 54 54 4f|00 01 00 00|77 4f 46 46)$/,
+    `expected OTF/WOFF magic, got ${magic}`);
+});
+
+test('robustness: malformed mimetype rejects with a clear error (issue #21)', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  // Build a tiny ZIP at the page level using browser-side helpers.
+  // Bad mimetype → openEpub throws → reader fires epub-error.
+  const errorMessage = await page.evaluate(async () => {
+    // Minimal valid ZIP with a single "mimetype" entry containing the
+    // wrong string, and nothing else. Hand-crafted bytes follow the
+    // ZIP spec.
+    const content = new TextEncoder().encode('text/plain');
+    const name = new TextEncoder().encode('mimetype');
+    const lfh = new Uint8Array(30 + name.length + content.length);
+    const dv = new DataView(lfh.buffer);
+    dv.setUint32(0,  0x04034b50, true);   // local file header signature
+    dv.setUint16(4,  20,         true);   // version
+    dv.setUint16(6,  0,          true);   // flags
+    dv.setUint16(8,  0,          true);   // method = stored
+    dv.setUint32(14, 0,          true);   // crc32 (skipped — readers don't enforce here)
+    dv.setUint32(18, content.length, true);
+    dv.setUint32(22, content.length, true);
+    dv.setUint16(26, name.length, true);
+    dv.setUint16(28, 0, true);
+    lfh.set(name, 30);
+    lfh.set(content, 30 + name.length);
+
+    const cd = new Uint8Array(46 + name.length);
+    const cdv = new DataView(cd.buffer);
+    cdv.setUint32(0, 0x02014b50, true);   // CD header signature
+    cdv.setUint16(4, 20, true); cdv.setUint16(6, 20, true);
+    cdv.setUint16(8, 0, true);  cdv.setUint16(10, 0, true);
+    cdv.setUint32(20, content.length, true);
+    cdv.setUint32(24, content.length, true);
+    cdv.setUint16(28, name.length, true);
+    cdv.setUint16(30, 0, true); cdv.setUint16(32, 0, true);
+    cdv.setUint32(42, 0, true);           // local header offset = 0
+    cd.set(name, 46);
+
+    const eocd = new Uint8Array(22);
+    const ev = new DataView(eocd.buffer);
+    ev.setUint32(0,  0x06054b50, true);
+    ev.setUint16(8,  1, true); ev.setUint16(10, 1, true);
+    ev.setUint32(12, cd.length, true);
+    ev.setUint32(16, lfh.length, true);
+
+    const total = new Uint8Array(lfh.length + cd.length + eocd.length);
+    total.set(lfh, 0);
+    total.set(cd, lfh.length);
+    total.set(eocd, lfh.length + cd.length);
+    const blob = new Blob([total], { type: 'application/epub+zip' });
+
+    return await new Promise((resolve) => {
+      const reader = document.getElementById('reader');
+      reader.addEventListener('epub-error', (e) =>
+        resolve(e.detail.error?.message || String(e.detail.error)),
+        { once: true });
+      reader.open(blob);
+    });
+  });
+  matches(errorMessage, /mimetype.*application\/epub\+zip/i,
+    `expected a mimetype error, got ${errorMessage}`);
+});
+
+test('robustness: missing container.xml rejects with a clear error (issue #21)', async (h, { page }) => {
+  await page.goto(`${server.url}/index.html`, { waitUntil: 'domcontentloaded' });
+  // Empty ZIP (just an EOCD record) — no container.xml inside.
+  const errorMessage = await page.evaluate(async () => {
+    const eocd = new Uint8Array(22);
+    const ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    const blob = new Blob([eocd], { type: 'application/epub+zip' });
+    return await new Promise((resolve) => {
+      const reader = document.getElementById('reader');
+      reader.addEventListener('epub-error', (e) =>
+        resolve(e.detail.error?.message || String(e.detail.error)),
+        { once: true });
+      reader.open(blob);
+    });
+  });
+  matches(errorMessage, /container\.xml/i,
+    `expected a container.xml error, got ${errorMessage}`);
 });
 
 // ---------- runner ----------
