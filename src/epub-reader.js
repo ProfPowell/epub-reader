@@ -149,6 +149,8 @@ import { findOffsets, plainText, rangeFromOffsets, wrapRange, unwrapAll, offsets
  * @property {HTMLOListElement}    hlList
  * @property {HTMLButtonElement}   hlPanelClose
  * @property {HTMLElement}         hlPopover
+ * @property {HTMLElement}         srLive
+ * @property {HTMLAnchorElement}   skipLink
  */
 
 /**
@@ -297,6 +299,30 @@ const MARKS_CSS = `
 
 const COMPONENT_CSS = `
 @scope (epub-reader) {
+  /* Visually-hidden helper for live regions and screen-reader-only text. */
+  .sr-only {
+    position: absolute;
+    inline-size: 1px; block-size: 1px;
+    margin: -1px; padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* Skip-link sits above everything when focused. */
+  .skip-link {
+    position: absolute;
+    inset-inline-start: 0.5rem;
+    inset-block-start: -3rem;
+    z-index: 10;
+    padding: 0.5rem 0.8rem;
+    background: var(--color-interactive, #2d6cdf);
+    color: var(--color-interactive-text, #fff);
+    border-radius: var(--radius-s, 0.25rem);
+    text-decoration: none;
+    transition: inset-block-start 120ms ease;
+  }
+  .skip-link:focus { inset-block-start: 0.5rem; outline: 2px solid var(--color-text, #1f1f1f); }
+
   :scope {
     display: grid;
     grid-template-rows: auto 1fr;
@@ -996,6 +1022,8 @@ const COMPONENT_CSS = `
 // (.reader-chrome, .reader-controls, .reader-control-group, .reader-icon-btn)
 // so VB stylesheets — when loaded — paint the reader natively.
 const TEMPLATE = `
+<a class="skip-link" href="#__epub_chapter">Skip to chapter content</a>
+<div class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 <header class="reader-chrome">
   <div class="reader-chrome-copy">
     <span class="reader-chrome-kicker">EPUB</span>
@@ -1031,7 +1059,10 @@ const TEMPLATE = `
   <button class="reader-icon-btn find-close" type="button" aria-label="Close find">&times;</button>
 </div>
 <div class="body">
-  <aside class="sidebar"><h2>Contents</h2><ol class="toc"></ol></aside>
+  <aside class="sidebar" aria-label="Table of contents">
+    <h2 id="toc-heading">Contents</h2>
+    <ol class="toc" role="tree" aria-labelledby="toc-heading"></ol>
+  </aside>
   <div class="content">
     <aside class="settings-panel" role="dialog" aria-label="Reading settings" hidden>
       <h3>Reading settings</h3>
@@ -1118,7 +1149,7 @@ const TEMPLATE = `
         <button type="button" class="lib-close primary">Done</button>
       </div>
     </aside>
-    <iframe sandbox="allow-same-origin" title="EPUB content"></iframe>
+    <iframe id="__epub_chapter" sandbox="allow-same-origin" title="EPUB content" tabindex="0"></iframe>
     <div class="hl-popover" role="toolbar" aria-label="Highlight" hidden>
       <button type="button" class="hl-color" data-color="#fde68a" aria-label="Yellow highlight" style="--c:#fde68a"></button>
       <button type="button" class="hl-color" data-color="#bbf7d0" aria-label="Green highlight" style="--c:#bbf7d0"></button>
@@ -1219,6 +1250,8 @@ export class EpubReaderElement extends HTMLElement {
       hlList:             $('.hl-list'),
       hlPanelClose:       $('.hl-close'),
       hlPopover:          $('.hl-popover'),
+      srLive:             $('.sr-only[role="status"]'),
+      skipLink:           $('.skip-link'),
     };
     this.#els.prev.addEventListener('click', () => this.prev());
     this.#els.next.addEventListener('click', () => this.next());
@@ -1681,7 +1714,8 @@ export class EpubReaderElement extends HTMLElement {
   }
 
   async #toggleSearchPanel(force) {
-    const open = typeof force === 'boolean' ? force : this.#els.searchPanel.hidden;
+    const wasOpen = !this.#els.searchPanel.hidden;
+    const open = typeof force === 'boolean' ? force : !wasOpen;
     this.#els.searchPanel.hidden = !open;
     this.#els.searchToggle.setAttribute('aria-expanded', String(open));
     if (open) {
@@ -1694,6 +1728,8 @@ export class EpubReaderElement extends HTMLElement {
       this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
       this.#els.searchInput.focus();
       this.#els.searchInput.select();
+    } else if (wasOpen) {
+      this.#els.searchToggle.focus();
     }
   }
 
@@ -1977,7 +2013,8 @@ export class EpubReaderElement extends HTMLElement {
   #hideHighlightPopover() { this.#els.hlPopover.hidden = true; }
 
   #toggleHighlightsPanel(force) {
-    const open = typeof force === 'boolean' ? force : this.#els.highlightsPanel.hidden;
+    const wasOpen = !this.#els.highlightsPanel.hidden;
+    const open = typeof force === 'boolean' ? force : !wasOpen;
     this.#els.highlightsPanel.hidden = !open;
     this.#els.highlightsToggle.setAttribute('aria-expanded', String(open));
     if (open) {
@@ -1991,6 +2028,8 @@ export class EpubReaderElement extends HTMLElement {
       this.#els.searchPanel.hidden = true;
       this.#els.searchToggle.setAttribute('aria-expanded', 'false');
       this.#renderHighlights();
+    } else if (wasOpen) {
+      this.#els.highlightsToggle.focus();
     }
   }
 
@@ -2219,7 +2258,8 @@ export class EpubReaderElement extends HTMLElement {
   }
 
   #toggleBookmarksPanel(force) {
-    const open = typeof force === 'boolean' ? force : this.#els.bookmarksPanel.hidden;
+    const wasOpen = !this.#els.bookmarksPanel.hidden;
+    const open = typeof force === 'boolean' ? force : !wasOpen;
     this.#els.bookmarksPanel.hidden = !open;
     this.#els.bookmarksToggle.setAttribute('aria-expanded', String(open));
     if (open) {
@@ -2228,6 +2268,8 @@ export class EpubReaderElement extends HTMLElement {
       this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
       this.#els.libraryPanel.hidden = true;
       this.#els.libraryToggle.setAttribute('aria-expanded', 'false');
+    } else if (wasOpen) {
+      this.#els.bookmarksToggle.focus();
     }
   }
 
@@ -2364,6 +2406,8 @@ export class EpubReaderElement extends HTMLElement {
       this.#els.settingsPanel.hidden = true;
       this.#els.settingsToggle.setAttribute('aria-expanded', 'false');
       await this.#renderLibrary();
+    } else if (wasOpen) {
+      this.#els.libraryToggle.focus();
     }
   }
 
@@ -2501,15 +2545,22 @@ export class EpubReaderElement extends HTMLElement {
     this.#els.iframe.dataset.fragment = fragment;
     this.#els.iframe.src = chapter.url;
     this.#updateChrome();
+    const chapterTitle = this.#tocLabelForPath(chapter.path);
     this.dispatchEvent(new CustomEvent('epub-navigate', {
       detail: {
         index,
         path: chapter.path,
-        title: this.#tocLabelForPath(chapter.path),
+        title: chapterTitle,
       },
       bubbles: true,
       composed: true,
     }));
+    // Announce the chapter change politely to screen readers.
+    if (this.#els.srLive) {
+      const total = spine.length;
+      const label = chapterTitle ? `: ${chapterTitle}` : '';
+      this.#els.srLive.textContent = `Chapter ${index + 1} of ${total}${label}`;
+    }
     // Persist immediately on chapter change (don't wait for the
     // throttled scroll-pause save) so closing the tab mid-chapter
     // resumes from the right place next time.
@@ -2555,10 +2606,11 @@ export class EpubReaderElement extends HTMLElement {
     const ol = this.#els.toc;
     ol.innerHTML = '';
     if (!this.#book) return;
-    const buildList = (items) => {
+    const buildList = (items, depth = 1) => {
       const frag = document.createDocumentFragment();
       for (const item of items) {
         const li = document.createElement('li');
+        li.setAttribute('role', 'none');
         // EPUB nav docs use <span> (no href) for section group headings
         // like author names. Render those as a non-link element so they
         // aren't focusable as links and don't look clickable.
@@ -2568,6 +2620,8 @@ export class EpubReaderElement extends HTMLElement {
           a.href = '#';
           a.dataset.path = item.path;
           a.dataset.fragment = item.fragment || '';
+          a.setAttribute('role', 'treeitem');
+          a.setAttribute('aria-level', String(depth));
           a.addEventListener('click', (e) => {
             e.preventDefault();
             if (!this.#book) return;
@@ -2579,12 +2633,16 @@ export class EpubReaderElement extends HTMLElement {
         } else {
           const heading = document.createElement('strong');
           heading.className = 'toc-heading';
+          heading.setAttribute('role', 'treeitem');
+          heading.setAttribute('aria-level', String(depth));
+          heading.setAttribute('aria-disabled', 'true');
           heading.textContent = item.label;
           li.append(heading);
         }
         if (item.children && item.children.length) {
           const sub = document.createElement('ol');
-          sub.append(buildList(item.children));
+          sub.setAttribute('role', 'group');
+          sub.append(buildList(item.children, depth + 1));
           li.append(sub);
         }
         frag.append(li);
@@ -2597,7 +2655,10 @@ export class EpubReaderElement extends HTMLElement {
   #highlightToc() {
     const path = this.#book?.spine[this.#currentIndex]?.path;
     for (const a of this.#els.toc.querySelectorAll('a')) {
-      a.classList.toggle('current', !!path && a.dataset.path === path);
+      const isCurrent = !!path && a.dataset.path === path;
+      a.classList.toggle('current', isCurrent);
+      if (isCurrent) a.setAttribute('aria-current', 'true');
+      else a.removeAttribute('aria-current');
     }
   }
 
@@ -3077,10 +3138,17 @@ export class EpubReaderElement extends HTMLElement {
   }
 
   #toggleSettings(force) {
-    const open = typeof force === 'boolean' ? force : this.#els.settingsPanel.hidden;
+    const wasOpen = !this.#els.settingsPanel.hidden;
+    const open = typeof force === 'boolean' ? force : !wasOpen;
     this.#els.settingsPanel.hidden = !open;
     this.#els.settingsToggle.setAttribute('aria-expanded', String(open));
-    if (open) this.#els.sFontFamily.focus();
+    if (open) {
+      this.#els.sFontFamily.focus();
+    } else if (wasOpen) {
+      // Return focus to the toggle that opened us — keyboard users
+      // shouldn't be stranded at the body when the panel closes.
+      this.#els.settingsToggle.focus();
+    }
   }
 
   #wireSettingsControls() {

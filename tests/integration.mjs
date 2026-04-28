@@ -1670,6 +1670,92 @@ test('robustness: missing container.xml rejects with a clear error (issue #21)',
     `expected a container.xml error, got ${errorMessage}`);
 });
 
+test('a11y: chrome controls all have accessible names (issue #20)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const missing = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    /** @type {string[]} */
+    const out = [];
+    for (const el of r.querySelectorAll('button')) {
+      const name = el.getAttribute('aria-label') || el.textContent?.trim();
+      if (!name) out.push(el.outerHTML.slice(0, 60));
+    }
+    return out;
+  });
+  eq(missing.length, 0, `expected every button to have an accessible name; missing: ${JSON.stringify(missing)}`);
+});
+
+test('a11y: TOC uses tree/treeitem roles + aria-current on the active entry (issue #20)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  const treeShape = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return {
+      treeRole: r.querySelector('.toc')?.getAttribute('role'),
+      treeitemCount: r.querySelectorAll('.toc [role="treeitem"]').length,
+      anchorCount: r.querySelectorAll('.toc a').length,
+    };
+  });
+  eq(treeShape.treeRole, 'tree');
+  truthy(treeShape.treeitemCount > 0, 'expected role=treeitem on TOC entries');
+  // Every TOC anchor should also be a treeitem.
+  truthy(treeShape.treeitemCount >= treeShape.anchorCount,
+    `treeitems (${treeShape.treeitemCount}) should cover anchors (${treeShape.anchorCount})`);
+
+  // Navigate to a known chapter; aria-current should land on its TOC entry.
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await h.waitChapter((doc) => doc.body && doc.body.children.length > 0);
+  const current = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const els = [...r.querySelectorAll('.toc a[aria-current="true"]')];
+    return els.length;
+  });
+  truthy(current === 1, `expected exactly one aria-current=true TOC entry, got ${current}`);
+});
+
+test('a11y: chapter changes announce via the polite live region (issue #20)', async (h, { page }) => {
+  await h.openSample('moby-dick.epub');
+  await page.evaluate(() => document.getElementById('reader').goToIndex(5));
+  await page.waitForFunction(() => {
+    const r = document.getElementById('reader');
+    return /^Chapter 6 of \d+/.test(r.querySelector('[role="status"]')?.textContent || '');
+  }, null, { timeout: 5_000 });
+  const live = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const el = r.querySelector('[role="status"]');
+    return { text: el?.textContent || '', polite: el?.getAttribute('aria-live') };
+  });
+  eq(live.polite, 'polite', 'live region should be polite');
+  matches(live.text, /^Chapter 6 of \d+/, `expected "Chapter 6 of N…", got ${JSON.stringify(live.text)}`);
+});
+
+test('a11y: skip link is present and targets the chapter iframe (issue #20)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  const link = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const a = r.querySelector('a.skip-link');
+    return a ? { href: a.getAttribute('href'), text: a.textContent } : null;
+  });
+  truthy(link, 'expected a .skip-link element');
+  eq(link.href, '#__epub_chapter');
+  matches(link.text, /skip/i, 'skip link should mention skipping');
+});
+
+test('a11y: closing the settings panel returns focus to its toggle (issue #20)', async (h, { page }) => {
+  await h.openSample('trees.epub');
+  await page.click('.settings-toggle');
+  await page.waitForFunction(() =>
+    !document.getElementById('reader').querySelector('.settings-panel').hidden);
+  // Click the panel's Done button.
+  await page.click('.s-close');
+  // After close, document.activeElement should be the settings-toggle.
+  const focusedClass = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    const a = r.contains(document.activeElement) ? document.activeElement.className : '';
+    return a;
+  });
+  matches(focusedClass, /settings-toggle/, `focus should return to the toggle, got "${focusedClass}"`);
+});
+
 // ---------- runner ----------
 
 const filtered = grep ? tests.filter(t => t.name.includes(grep)) : tests;
