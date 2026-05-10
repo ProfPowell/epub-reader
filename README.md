@@ -89,6 +89,25 @@ augments `HTMLElementTagNameMap` so TypeScript projects get strong types
 out of `document.querySelector('epub-reader')`, plus typed `addEventListener`
 overloads for `epub-loaded`, `epub-navigate`, and `epub-error`.
 
+## Install
+
+From npm (for use in another project):
+
+```sh
+npm install @profpowell/epub-reader
+```
+
+```js
+import '@profpowell/epub-reader';
+```
+
+Or load directly from a CDN — no install, no bundler:
+
+```html
+<script type="module" src="https://unpkg.com/@profpowell/epub-reader/src/epub-reader.js"></script>
+<epub-reader src="path/to/book.epub"></epub-reader>
+```
+
 ## Component API
 
 ```html

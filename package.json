@@ -1,9 +1,45 @@
 {
-  "name": "epub-reader",
+  "name": "@profpowell/epub-reader",
   "version": "0.1.0",
   "description": "Dependency-free EPUB 3 reader built from vanilla web platform primitives.",
   "type": "module",
-  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/epub-reader.d.ts",
+      "default": "./src/epub-reader.js"
+    },
+    "./epub": "./src/epub.js",
+    "./zip": "./src/zip.js"
+  },
+  "types": "./src/epub-reader.d.ts",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "epub",
+    "epub3",
+    "ebook",
+    "reader",
+    "web-component",
+    "custom-element",
+    "vanilla",
+    "no-dependencies"
+  ],
+  "author": "ProfPowell",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ProfPowell/epub-reader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ProfPowell/epub-reader/issues"
+  },
+  "homepage": "https://profpowell.github.io/epub-reader/",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "node tests/run-samples.mjs && node tests/integration.mjs",
     "test:samples": "node tests/run-samples.mjs",
