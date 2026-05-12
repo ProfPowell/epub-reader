@@ -141,10 +141,25 @@ Or load directly from a CDN — no install, no bundler:
 
 **Styling**
 
-The component uses `::part(toolbar | sidebar | content | iframe | title | progress | toc | overlay)`
-for external theming, and respects Vanilla Breeze tokens
-(`--vb-color-surface`, `--vb-color-text`, `--vb-color-primary`, etc.) when
-present.
+The component exposes `::part(toolbar | sidebar | content | iframe | title | progress | toc | overlay)`
+for external theming and reads a set of CSS custom properties from its
+host environment. The current bundle uses **bare** Vanilla Breeze token
+names (no `--vb-` prefix), so anything in the VB token namespace flows
+in automatically when VB's stylesheet is loaded — no bridge required.
+
+Tokens the bundle reads (defaults fall back where reasonable):
+
+| Group | Tokens |
+|---|---|
+| Color | `--color-surface`, `--color-surface-raised`, `--color-background`, `--color-text`, `--color-text-muted`, `--color-border`, `--color-interactive`, `--color-interactive-text`, `--color-danger` |
+| Typography | `--font-mono`, `--font-size-2xs` / `--font-size-xs` / `--font-size-s` / `--font-size-m`, `--font-weight-semibold` |
+| Spacing | `--size-3xs` / `--size-2xs` / `--size-s` / `--size-m` |
+| Shape | `--radius-s` / `--radius-m` / `--radius-full`, `--border-width-thin`, `--shadow-l` |
+| Reader-specific | `--reader-hl-color` (highlight color override) |
+
+Outside Vanilla Breeze, set any of these on a parent (or directly on
+`<epub-reader>`) to theme the component. Inside VB, you generally
+don't need to set anything — the active theme already provides them.
 
 ## Known limitations
 
